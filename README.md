@@ -14,9 +14,9 @@ npm install
 
 ## Настройка
 
-1. Откройте файл `.env` и измените значения на свои:
+1. Откройте файл `.env.example` и измените значения на свои, далее переименуйте в `.env`:
 ```bash
-TELEGRAM_TOKEN=KEY
+TELEGRAM_TOKEN=BOT_TOKEN
 ```
 
 Получить токен можно у [@BotFather](https://t.me/BotFather)
