@@ -3,33 +3,58 @@ import { load } from 'cheerio';
 import { Lesson, Schedule } from '../types';
 import iconv from 'iconv-lite';
 import TeachersService from '../services/TeachersService';
+import { CacheService } from './cacheService';
 
 export class ScheduleParser {
   private baseUrl: string;
   private readonly timeout: number = 10000;
+  private readonly maxRetries: number = 3;
+  private readonly retryDelay: number = 5000; // 5 seconds
   private teachersService: TeachersService;
-
+  private cacheService: CacheService;
   constructor() {
     this.baseUrl = 'https://dmitrov.politeh-mo.ru/rasp';
     this.teachersService = TeachersService.getInstance();
+    this.cacheService = CacheService.getInstance();
   }
 
+  private async retry<T>(operation: () => Promise<T>, retries: number = this.maxRetries): Promise<T> {
+    try {
+      return await operation();
+    } catch (error) {
+      if (retries > 0) {
+        console.log(`Retrying operation, ${retries} attempts left`);
+        await new Promise(resolve => setTimeout(resolve, this.retryDelay));
+        return this.retry(operation, retries - 1);
+      }
+      throw error;
+    }
+  }
+  
   async fetchSchedule(groupId: string, date: Date = new Date()): Promise<Schedule> {    
+    const dateStr = this.formatDate(date);
+    
+    const cachedSchedule = this.cacheService.getSchedule(groupId, dateStr);
+    if (cachedSchedule) {
+      return cachedSchedule;
+    }
 
     const url = `${this.baseUrl}/cg${groupId}.htm`;
     console.log('Fetching schedule from:', url);
 
     try {
-      const response = await axios.get(url, {
-        timeout: this.timeout,
-        responseType: 'arraybuffer',
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-          'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7'
-        },
-        validateStatus: (status) => status === 200
-      });
+      const response = await this.retry(() => 
+        axios.get(url, {
+          timeout: this.timeout,
+          responseType: 'arraybuffer',
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7'
+          },
+          validateStatus: (status) => status === 200
+        })
+      );
 
       if (!response.data) {
         throw new Error('Empty response received');
@@ -38,15 +63,7 @@ export class ScheduleParser {
       const html = iconv.decode(Buffer.from(response.data), 'win1251');
       const schedule = await this.parseSchedule(html, date);
       
-      if (schedule.lessons.length === 0) {
-        return {
-          date: date.toLocaleDateString('ru-RU'),
-          dayOfWeek: date.toLocaleDateString('ru-RU', { weekday: 'long' }),
-          lessons: [],
-          isEmpty: true
-        };
-      }
-
+      this.cacheService.setSchedule(groupId, dateStr, schedule);
       return schedule;
 
     } catch (error) {
@@ -65,10 +82,9 @@ export class ScheduleParser {
       }
 
       console.error('Parser error:', error);
-      throw new Error('Failed to parse schedule data');
+      throw error;
     }
   }
-
   private async parseSchedule(html: string, targetDate: Date): Promise<Schedule> {
     const $ = load(html);
     const lessons: Lesson[] = [];
@@ -87,13 +103,11 @@ export class ScheduleParser {
           dateFound = true;
           console.log('Found matching date row:', rowDate);
           
-          // Теперь обрабатываем саму строку с датой, так как она содержит первую пару
           const lessonCell = $(dateRow).find('td.ur');
           const timeCell = $(dateRow).find('td.hd').filter((_, el) => {
             return $(el).text().includes('Пара:');
           });
           
-          // Проверяем наличие первой пары в текущей строке
           if (lessonCell.length && timeCell.length) {
             const timeText = timeCell.text().trim();
             const timeMatch = timeText.match(/\d+\.\d+-\d+\.\d+/);
@@ -121,7 +135,6 @@ export class ScheduleParser {
             }
           }
           
-          // Теперь обрабатываем следующие пары
           let currentRow = $(dateRow).next('tr');
           for (let i = 1; i < 6; i++) {
             if (!currentRow.length) break;
