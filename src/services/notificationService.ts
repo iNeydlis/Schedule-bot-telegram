@@ -97,7 +97,7 @@ export class NotificationService {
           console.log('New update detected - resetting notification flag');
           this.notificationSent = false;
           this.lastUpdateTime = currentUpdateTime;          
-          
+          this.cacheService.clearAllScheduleCaches();
           if (this.scheduledTimer) {
             console.log('Cancelling previously scheduled notification');
             clearTimeout(this.scheduledTimer);
