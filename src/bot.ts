@@ -101,14 +101,7 @@ export class ScheduleBot {
       const userId = msg.from?.id;
       if (!userId) return;
 
-      if (this.messageManager.checkSpam(userId)) {
-        const warningMsg = await this.bot.sendMessage(
-          msg.chat.id,
-          '⚠️ Пожалуйста, подождите немного перед следующим запросом.'
-        );
-        setTimeout(() => {
-          this.bot.deleteMessage(msg.chat.id, warningMsg.message_id);
-        }, 3000);
+      if (!this.messageManager.shouldProcessCommand(userId)) {
         return;
       }
 
@@ -116,6 +109,7 @@ export class ScheduleBot {
         await this.handleMessage(msg);
       }
     });
+
 
     // Обработка добавления бота в группу
     this.bot.on('new_chat_members', async (msg) => {

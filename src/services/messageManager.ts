@@ -1,7 +1,6 @@
 import TelegramBot from 'node-telegram-bot-api';
 import mongoose from 'mongoose';
 
-// Создаем схему для хранения сообщений
 const messageSchema = new mongoose.Schema({
   chatId: { type: Number, required: true },
   messageIds: { type: [Number], required: true },
@@ -10,14 +9,11 @@ const messageSchema = new mongoose.Schema({
 const MessageHistory = mongoose.model('MessageHistory', messageSchema);
 
 export class MessageManager {
-  private spamProtection: Map<number, { lastMessageTime: number; messageCount: number }> = new Map();
-  private readonly SPAM_WINDOW = 30000; // 30 сек
-  private readonly SPAM_LIMIT = 10; // максимум сообщений в минуту
+  private lastCommandTime: Map<number, number> = new Map();
+  
+  private readonly MIN_COMMAND_INTERVAL = 150;
 
-  constructor() {
-    this.startCleanupInterval();
-  }
- private states: Map<number, string> = new Map();
+  private states: Map<number, string> = new Map();
 
   async setState(chatId: number, state: string | null): Promise<void> {
     if (state === null) {
@@ -30,17 +26,17 @@ export class MessageManager {
   async getState(chatId: number): Promise<string | null> {
     return this.states.get(chatId) || null;
   }
-  private startCleanupInterval() {
-    setInterval(() => this.cleanupOldData(), 3600000); // очистка каждый час
-  }
 
-  private cleanupOldData() {
+  shouldProcessCommand(userId: number): boolean {
     const now = Date.now();
-    for (const [userId, data] of this.spamProtection.entries()) {
-      if (now - data.lastMessageTime > this.SPAM_WINDOW) {
-        this.spamProtection.delete(userId);
-      }
+    const lastTime = this.lastCommandTime.get(userId) || 0;
+    
+    if (now - lastTime < this.MIN_COMMAND_INTERVAL) {
+      return false;
     }
+
+    this.lastCommandTime.set(userId, now);
+    return true;
   }
 
   async addMessage(bot: TelegramBot, chatId: number, messageId: number) {
@@ -69,7 +65,6 @@ export class MessageManager {
     }
   }
 
-  // Новый метод для обработки сообщений бота
   async addBotMessage(bot: TelegramBot, chatId: number, messageId: number) {
     let history = await MessageHistory.findOne({ chatId });
 
@@ -79,7 +74,6 @@ export class MessageManager {
         messageIds: [messageId],
       });
     } else {
-      // Удаляем старые сообщения бота
       const deletePromises = history.messageIds.map(async (oldMessageId) => {
         try {
           await bot.deleteMessage(chatId, oldMessageId);
@@ -89,8 +83,6 @@ export class MessageManager {
       });
 
       await Promise.all(deletePromises);
-
-      // Сохраняем только новое сообщение
       history.messageIds = [messageId];
     }
 
@@ -98,7 +90,6 @@ export class MessageManager {
   }
 
   private async deleteOldMessages(bot: TelegramBot, chatId: number) {
-    // Загружаем историю сообщений для данного чата
     const history = await MessageHistory.findOne({ chatId });
 
     if (!history || history.messageIds.length <= 1) return;
@@ -113,36 +104,10 @@ export class MessageManager {
       });
       await Promise.all(deletePromises);
 
-      // Сохраняем только последнее сообщение
       history.messageIds = [history.messageIds[history.messageIds.length - 1]];
       await history.save();
     } catch (error) {
       console.error(`Error deleting old messages for chat ${chatId}:`, error);
     }
-  }
-
-  checkSpam(userId: number): boolean {
-    const now = Date.now();
-    
-    if (!this.spamProtection.has(userId)) {
-      this.spamProtection.set(userId, { lastMessageTime: now, messageCount: 1 });
-      return false;
-    }
-
-    const userSpam = this.spamProtection.get(userId)!;
-    
-    if (now - userSpam.lastMessageTime > this.SPAM_WINDOW) {
-      this.spamProtection.set(userId, { lastMessageTime: now, messageCount: 1 });
-      return false;
-    }
-
-    userSpam.messageCount++;
-    userSpam.lastMessageTime = now;
-    this.spamProtection.set(userId, userSpam);
-    return userSpam.messageCount > this.SPAM_LIMIT;
-  }
-
-  resetSpamCount(userId: number): void {
-    this.spamProtection.delete(userId);
   }
 }
