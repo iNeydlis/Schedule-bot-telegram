@@ -15,10 +15,10 @@ export class NotificationService {
   private scheduleParser: ScheduleParser;
   private messageManager: MessageManager;
   private cacheService: CacheService;
-  private lastUpdateTime: string | null = null;
-  private notificationSent: boolean = false;
+  private lastUpdateTime: string | null = null;  
   private isFirstRun: boolean = true;  
   private scheduledTimer: NodeJS.Timeout | null = null;
+  private isProcessing: boolean = false;
   
   private readonly mainKeyboard = {
     keyboard: [
@@ -57,6 +57,12 @@ export class NotificationService {
   }
 
   private async checkForUpdate(): Promise<void> {
+    if (this.isProcessing) {
+      console.log('Previous check still in progress - skipping');
+      return;
+    }
+
+    this.isProcessing = true;
     try {
       const response = await this.retry(() => 
         axios.get("https://dmitrov.politeh-mo.ru/rasp/hg.htm", {
@@ -82,36 +88,30 @@ export class NotificationService {
         console.log(`Current time: ${currentHour}:00`);
         console.log(`Last update time: ${this.lastUpdateTime}`);
         console.log(`Current update time: ${currentUpdateTime}`);
-        console.log(`Notification already sent: ${this.notificationSent}`);
         console.log(`Is first run: ${this.isFirstRun}`);
   
         if (this.isFirstRun) {
-          console.log('First run detected - just saving initial state');
+          console.log('First run detected - saving initial state');
           this.lastUpdateTime = currentUpdateTime;
-          this.notificationSent = true;
           this.isFirstRun = false;
           return;
         }
   
+        
         if (this.lastUpdateTime !== currentUpdateTime) {
-          console.log('New update detected - resetting notification flag');
-          this.notificationSent = false;
-          this.lastUpdateTime = currentUpdateTime;          
+          console.log('New update detected');
+          this.lastUpdateTime = currentUpdateTime;
           this.cacheService.clearAllScheduleCaches();
           if (this.scheduledTimer) {
             console.log('Cancelling previously scheduled notification');
             clearTimeout(this.scheduledTimer);
             this.scheduledTimer = null;
           }
-        }
-        
-        if (!this.notificationSent) {
+          
           if (currentHour >= 15) {
-            console.log('After 15:00 - sending notification immediately');
+            console.log('After 15:00 - checking and sending notifications immediately');
             await this.checkAndSendNotifications();
-            this.notificationSent = true;
-            console.log('Notification sent and marked as completed');
-          } else {
+          } else {           
             const now = new Date();
             const scheduledTime = new Date(
               now.getFullYear(),
@@ -126,20 +126,23 @@ export class NotificationService {
             if (timeUntilScheduled > 0) {
               console.log(`Before 15:00 - scheduling notification for later`);
               this.scheduledTimer = setTimeout(async () => {
-                await this.checkAndSendNotifications();
-                this.notificationSent = true;
-                this.scheduledTimer = null;
-                console.log('Scheduled notification sent and marked as completed');
+                try {
+                  await this.checkAndSendNotifications();
+                } catch (error) {
+                  console.error('Error sending scheduled notification:', error);
+                } finally {
+                  this.scheduledTimer = null;
+                }
               }, timeUntilScheduled);
               console.log(`Notification scheduled for 15:00 (in ${Math.round(timeUntilScheduled/1000/60)} minutes)`);
             }
           }
-        } else {
-          console.log('Notification already sent for this update - skipping');
         }
       }
     } catch (error) {
       console.error('Ошибка при проверке страницы:', error);
+    } finally {
+      this.isProcessing = false;
     }
   }
 
@@ -159,11 +162,12 @@ export class NotificationService {
             hasSchedule: schedule.lessons.length > 0,
             lessonsCount: schedule.lessons.length,
             previousHashExists: !!previousHash,
-            hashesMatch: previousHash === newScheduleHash
+            hashesMatch: previousHash === newScheduleHash,
+            previousHash: previousHash,
+            newScheduleHash: newScheduleHash
           });          
           
-          if ((!previousHash && schedule.lessons.length > 0) || 
-              (previousHash && previousHash !== newScheduleHash)) {
+          if (previousHash !== newScheduleHash) {
             console.log(`Sending notification to ${user.chatId} due to schedule changes`);
             await this.sendNotification(user.chatId, schedule);
             this.cacheService.setScheduleHash(user.chatId, tomorrow, newScheduleHash);

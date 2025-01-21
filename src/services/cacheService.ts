@@ -50,12 +50,19 @@ export class CacheService {
 
  
   public clearAllScheduleCaches(): void {
-    const keys = this.cache.keys();
+    const keys = this.cache.keys();       
     const scheduleKeys = keys.filter(key => 
-      key.startsWith(this.SCHEDULE_PREFIX) || 
-      key.startsWith(this.SCHEDULE_HASH_PREFIX)
+      key.startsWith(this.SCHEDULE_PREFIX) && !key.startsWith(this.SCHEDULE_HASH_PREFIX)
     );
-    this.cache.del(scheduleKeys);
+    console.log('Clearing schedule cache keys:', scheduleKeys);
+    this.cache.del(scheduleKeys);   
+  }
+
+  public clearAllScheduleHashes(): void {
+    const keys = this.cache.keys();    
+    const hashKeys = keys.filter(key => key.startsWith(this.SCHEDULE_HASH_PREFIX));
+    console.log('Clearing hash cache keys:', hashKeys);
+    this.cache.del(hashKeys);   
   }
 
 

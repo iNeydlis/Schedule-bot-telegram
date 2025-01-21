@@ -90,6 +90,7 @@ export class ScheduleBot {
     this.bot.setMyCommands([
       { command: '/start', description: 'Начать работу с ботом' },
       { command: '/schedule', description: 'Показать расписание' },
+      { command: '/other', description: 'Посмотреть расписание другой группы' },
       { command: '/notifications', description: 'Управление уведомлениями' },
       { command: '/help', description: 'Помощь по использованию бота' }
     ]);
@@ -156,6 +157,9 @@ export class ScheduleBot {
         case '📅 Расписание':
           await this.handleSchedule(msg);
           break;
+        case '/other':
+          await this.handleOtherSchedule(msg);
+        break;
         case '/notifications':
         case '🔔 Уведомления':
           await this.handleNotifications(msg);
@@ -183,6 +187,9 @@ export class ScheduleBot {
         case '📅 Расписание':
           await this.handleSchedule(msg);
           break;
+        case '/other':
+          await this.handleOtherSchedule(msg);
+        break;
         case '/notifications':
         case '🔔 Уведомления':
           await this.handleNotifications(msg);
@@ -198,11 +205,87 @@ export class ScheduleBot {
           break;
         default:
           if (this.isGroupInput(text)) {
-            await this.handleGroupInput(msg, text);
+            const state = await this.messageManager.getState(chatId);
+            if (state === 'awaiting_other_group') {
+              await this.handleOtherGroupSchedule(msg, text);
+            } else {
+              await this.handleGroupInput(msg, text);
+            }
           }
       }
     }
   }
+
+  private async handleOtherGroupSchedule(msg: TelegramBot.Message, groupName: string): Promise<void> {
+    const chatId = msg.chat.id;
+    const groupNameNormalized = groupName.toUpperCase();
+ 
+    if (groupMap[groupNameNormalized]) {
+        const groupId = groupMap[groupNameNormalized];
+        await this.messageManager.setState(chatId, null);
+     
+        try {
+            // Получаем текущую дату только если нет сохраненной даты или флага выбранной даты
+            let currentDate = this.userSelectedDates.has(chatId)
+                ? (this.dateMap.get(chatId) || new Date())
+                : new Date();
+            
+            let schedule = await this.scheduleParser.fetchSchedule(groupId, currentDate);
+            
+            // Ищем следующий доступный день только если нет флага выбранной даты
+            if (!this.userSelectedDates.has(chatId) && (!schedule.lessons || schedule.lessons.length === 0)) {
+                currentDate = await this.findNextAvailableDay(currentDate, groupId);
+                this.dateMap.set(chatId, currentDate);
+                schedule = await this.scheduleParser.fetchSchedule(groupId, currentDate);
+            }
+            
+            const formattedSchedule = this.formatFullSchedule(schedule, `Группа ${groupName}`);
+
+            // Создаем отдельные объекты для inline и regular клавиатур
+            const inlineKeyboard: TelegramBot.InlineKeyboardMarkup = {
+                inline_keyboard: [
+                    [
+                        { text: "⬅️ Предыдущий день", callback_data: "prev_day" },
+                        { text: "Следующий день ➡️", callback_data: "next_day" }
+                    ]
+                ]
+            };
+
+            const regularKeyboard: TelegramBot.ReplyKeyboardMarkup = {
+                keyboard: [
+                    [{ text: "📅 Расписание" }, { text: "📆 Выбрать дату" }],
+                    [{ text: "👥 Сменить группу" }, { text: "🔔 Уведомления" }]
+                ],
+                resize_keyboard: true
+            };
+
+            // Отправляем сообщение с обеими клавиатурами
+            const message = await this.bot.sendMessage(chatId, formattedSchedule, {
+                parse_mode: 'HTML',
+                reply_markup: { 
+                    ...inlineKeyboard,
+                    ...regularKeyboard 
+                }
+            });
+
+            if (message) {
+                await this.messageManager.addBotMessage(this.bot, chatId, message.message_id);
+            }
+        } catch (error) {
+            console.error('Error fetching other group schedule:', error);
+            await this.sendBotMessage(
+                chatId,
+                'Произошла ошибка при получении расписания. Попробуйте позже.'
+            );
+        }
+    } else {
+        await this.sendBotMessage(
+            chatId,
+            `Группа "${groupName}" не найдена. Попробуйте снова.`
+        );
+    }
+}
+
   private async handleHelp(msg: TelegramBot.Message): Promise<void> {
     const helpText = `
 🤖 <b>Помощь по использованию бота</b>
@@ -226,7 +309,6 @@ export class ScheduleBot {
 • При вводе номера группы используйте формат: 1234-1@${this.botUsername || 'имя_бота'}
 
 ⚙️ <b>Дополнительные возможности:</b>
-• Навигация по дням с помощью кнопок ⬅️ и ➡️
 • Выбор конкретной даты из календаря
 • Автоматические уведомления об изменениях в расписании
 
@@ -237,6 +319,9 @@ export class ScheduleBot {
 
 📌 <b>Формат номера группы:</b>
 • Используйте формат XXXX-X (например: 1521-2)
+
+🔗 <b>Исходный код:</b>
+• GitHub: https://github.com/iNeydlis/Schedule-bot-telegram
 
 `;
 
@@ -272,6 +357,17 @@ export class ScheduleBot {
       console.error('Error checking admin status:', error);
       return false;
     }
+  }
+
+  private async handleOtherSchedule(msg: TelegramBot.Message): Promise<void> {
+    const chatId = msg.chat.id;
+    
+    await this.sendBotMessage(
+      chatId,
+      "Введите номер группы, расписание которой хотите посмотреть (например, 1521-2):"
+    );
+    
+    await this.messageManager.setState(chatId, 'awaiting_other_group');
   }
 
   private async handleSchedule(msg: TelegramBot.Message): Promise<void> {
@@ -712,10 +808,14 @@ private formatDateButton(date: Date, hasLessons: boolean): string {
     }
   }
 
-  private formatFullSchedule(schedule: Schedule): string {
+  private formatFullSchedule(schedule: Schedule, groupTitle?: string): string {
     const hasLessons = schedule.lessons && Array.isArray(schedule.lessons) && schedule.lessons.length > 0;
     
-    let message = `📅 <b>${schedule.date} (${schedule.dayOfWeek})</b>\n\n`;
+    let message = '';
+    if (groupTitle) {
+      message += `👥 <b>${groupTitle}</b>\n`;
+    }
+    message += `📅 <b>${schedule.date} (${schedule.dayOfWeek})</b>\n\n`;
     
     if (!hasLessons) {
       message += '📢 <i>На этот день занятия не найдены</i>\n';
