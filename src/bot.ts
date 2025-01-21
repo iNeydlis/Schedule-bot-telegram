@@ -16,7 +16,8 @@ export class ScheduleBot {
   private readonly mainKeyboard = {
     keyboard: [
       [{ text: "📅 Расписание" }, { text: "📆 Выбрать дату" }],
-      [{ text: "👥 Сменить группу" }, { text: "🔔 Уведомления" }]
+      [{ text: "👥 Сменить группу" }, { text: "🔔 Уведомления" }],
+      [{ text: "👤 Профиль" }, { text: "📋 Другая группа" }] 
     ],
     resize_keyboard: true,
     persistent: true
@@ -92,6 +93,7 @@ export class ScheduleBot {
       { command: '/schedule', description: 'Показать расписание' },
       { command: '/other', description: 'Посмотреть расписание другой группы' },
       { command: '/notifications', description: 'Управление уведомлениями' },
+      { command: '/profile', description: 'Показать профиль' },
       { command: '/help', description: 'Помощь по использованию бота' }
     ]);
   }
@@ -158,7 +160,12 @@ export class ScheduleBot {
           await this.handleSchedule(msg);
           break;
         case '/other':
+        case '📋 Другая группа':
           await this.handleOtherSchedule(msg);
+        break;
+        case '/profile':
+        case '👤 Профиль':
+          await this.handleProfile(msg);
         break;
         case '/notifications':
         case '🔔 Уведомления':
@@ -175,7 +182,12 @@ export class ScheduleBot {
           break;        
         default:
           if (this.isGroupInput(cleanText)) {
-            await this.handleGroupInput(msg, cleanText);
+            const state = await this.messageManager.getState(chatId);
+            if (state === 'awaiting_other_group') {
+              await this.handleOtherGroupSchedule(msg, cleanText);
+            } else {
+              await this.handleGroupInput(msg, cleanText);
+            }
           }
       }
     } else {
@@ -188,8 +200,13 @@ export class ScheduleBot {
           await this.handleSchedule(msg);
           break;
         case '/other':
+        case '📋 Другая группа':
           await this.handleOtherSchedule(msg);
         break;
+        case '/profile':
+        case '👤 Профиль':
+            await this.handleProfile(msg);
+            break;
         case '/notifications':
         case '🔔 Уведомления':
           await this.handleNotifications(msg);
@@ -213,6 +230,62 @@ export class ScheduleBot {
             }
           }
       }
+    }
+  }
+
+  private async handleProfile(msg: TelegramBot.Message): Promise<void> {
+    const chatId = msg.chat.id;
+    const userId = msg.from?.id;
+    const isGroupChat = msg.chat.type === 'group' || msg.chat.type === 'supergroup';
+  
+    if (!userId) return;
+  
+    try {
+      const userPref = await UserPreferenceModel.findOne({
+        $or: [
+          { userId, chatId },
+          { groupChatId: chatId }
+        ]
+      });
+  
+      if (!userPref) {
+        await this.sendBotMessage(
+          chatId,
+          '⚠️ Профиль не настроен. Используйте /start для настройки.'
+        );
+        return;
+      }
+  
+      const groupName = Object.entries(groupMap).find(
+        ([_, value]) => value === userPref.groupId
+      )?.[0] || 'Неизвестная группа';
+  
+      let profileMessage = '👤 <b>Профиль</b>\n\n';
+      
+      if (isGroupChat) {
+        profileMessage += '📚 <b>Информация о чате:</b>\n';
+      } else {
+        profileMessage += '📚 <b>Ваша информация:</b>\n';
+      }
+      
+      profileMessage += `• Группа: ${groupName}\n`;
+      profileMessage += `• Уведомления: ${userPref.notifications ? '✅ Включены' : '❌ Выключены'}\n`;
+      
+      if (isGroupChat) {        
+        const isAdmin = await this.isUserAdmin(chatId, userId);
+        profileMessage += `• Права администратора: ${isAdmin ? '✅ Есть' : '❌ Нет'}\n`;
+      }        
+  
+      await this.sendBotMessage(chatId, profileMessage, {
+        parse_mode: 'HTML'
+      });
+  
+    } catch (error) {
+      console.error('Error in handleProfile:', error);
+      await this.sendBotMessage(
+        chatId,
+        'Произошла ошибка при получении профиля. Попробуйте позже.'
+      );
     }
   }
 
@@ -250,21 +323,14 @@ export class ScheduleBot {
                     ]
                 ]
             };
-
-            const regularKeyboard: TelegramBot.ReplyKeyboardMarkup = {
-                keyboard: [
-                    [{ text: "📅 Расписание" }, { text: "📆 Выбрать дату" }],
-                    [{ text: "👥 Сменить группу" }, { text: "🔔 Уведомления" }]
-                ],
-                resize_keyboard: true
-            };
+            
 
             // Отправляем сообщение с обеими клавиатурами
             const message = await this.bot.sendMessage(chatId, formattedSchedule, {
                 parse_mode: 'HTML',
                 reply_markup: { 
                     ...inlineKeyboard,
-                    ...regularKeyboard 
+                    ...this.mainKeyboard 
                 }
             });
 
@@ -293,7 +359,9 @@ export class ScheduleBot {
 📝 <b>Основные команды:</b>
 • /start - Начать работу с ботом и выбрать группу
 • /schedule - Показать расписание
+• /other - Посмотреть расписание другой группы
 • /notifications - Управление уведомлениями
+• /profile - Показать информацию о профиле
 • /help - Показать это сообщение
 
 📱 <b>Основные кнопки меню:</b>
@@ -301,6 +369,7 @@ export class ScheduleBot {
 • 📆 Выбрать дату - Выбрать конкретную дату
 • 👥 Сменить группу - Изменить текущую группу
 • 🔔 Уведомления - Включить/выключить уведомления
+• 👤 Профиль - Показать информацию о профиле
 
 💡 <b>Как пользоваться в групповом чате:</b>
 • Добавьте бота в группу как администратора
@@ -422,20 +491,14 @@ private async sendSchedule(chatId: number, groupId: string): Promise<void> {
           ]
       };
 
-      const regularKeyboard: TelegramBot.ReplyKeyboardMarkup = {
-          keyboard: [
-              [{ text: "📅 Расписание" }, { text: "📆 Выбрать дату" }],
-              [{ text: "👥 Сменить группу" }, { text: "🔔 Уведомления" }]
-          ],
-          resize_keyboard: true
-      };
+      
 
       // Отправляем сообщение с обеими клавиатурами
       const message = await this.bot.sendMessage(chatId, formattedSchedule, {
           parse_mode: 'HTML',
           reply_markup: { 
               ...inlineKeyboard,
-              ...regularKeyboard 
+              ...this.mainKeyboard 
           }
       });
 
@@ -487,7 +550,7 @@ private async sendSchedule(chatId: number, groupId: string): Promise<void> {
   }
 
   private isGroupInput(text: string): boolean {
-    return /^\d{4}-\d{1}$/.test(text);
+    return /^\d{4}-(\d{1}|[А-ЯA-Z]{2})$/.test(text.toUpperCase());
   }
 
   private async handleGroupInput(msg: TelegramBot.Message, groupName: string): Promise<void> {

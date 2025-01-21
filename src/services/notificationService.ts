@@ -23,7 +23,8 @@ export class NotificationService {
   private readonly mainKeyboard = {
     keyboard: [
       [{ text: "📅 Расписание" }, { text: "📆 Выбрать дату" }],
-      [{ text: "👥 Сменить группу" }, { text: "🔔 Уведомления" }]
+      [{ text: "👥 Сменить группу" }, { text: "🔔 Уведомления" }],
+      [{ text: "👤 Профиль" }, { text: "📋 Другая группа" }]
     ],
     resize_keyboard: true,
     persistent: true

@@ -3,9 +3,9 @@ import { Schedule } from '../types';
 
 export class CacheService {
   private static instance: CacheService;
-  private cache: NodeCache;
-  private readonly SCHEDULE_PREFIX = 'schedule_';
-  private readonly SCHEDULE_HASH_PREFIX = 'schedule_hash_';
+  public  cache: NodeCache;
+  public  readonly SCHEDULE_PREFIX = 'schedule_';
+  public  readonly SCHEDULE_HASH_PREFIX = 'schedule_hash_';
 
   private constructor() {
     this.cache = new NodeCache({
