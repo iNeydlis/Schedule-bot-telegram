@@ -7,7 +7,7 @@ import { groupMap } from './groupMap';
 import { MessageManager } from './services/messageManager';
 import { TimeInputHandler } from './models/TimeInputHandler';
 
-const VERSION = '0.9.3 BETA';
+const VERSION = '0.9.4 BETA';
 
 export class ScheduleBot {
   private bot: TelegramBot;

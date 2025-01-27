@@ -2,7 +2,7 @@ import cron from 'node-cron';
 import { UserPreferenceModel } from '../models/UserPreference';
 import { ScheduleParser } from './scheduleParser';
 import TelegramBot from 'node-telegram-bot-api';
-import { Schedule } from '../types';
+import { Schedule, UserPreference } from '../types';
 import axios from 'axios';
 import { load } from 'cheerio';
 import iconv from 'iconv-lite';
@@ -19,6 +19,7 @@ export class NotificationService {
   private isFirstRun: boolean = true;  
   private scheduledTimer: NodeJS.Timeout | null = null;
   private isProcessing: boolean = false;
+  private userTimers: Map<number, NodeJS.Timeout> = new Map();
   
   private readonly mainKeyboard = {
     keyboard: [
@@ -62,10 +63,11 @@ export class NotificationService {
       console.log('Previous check still in progress - skipping');
       return;
     }
-
+    
     this.isProcessing = true;
+    
     try {
-      const response = await this.retry(() => 
+      const response = await this.retry(() =>
         axios.get("https://dmitrov.politeh-mo.ru/rasp/hg.htm", {
           timeout: 10000,
           responseType: 'arraybuffer',
@@ -76,75 +78,92 @@ export class NotificationService {
           }
         })
       );
-
+      
       const html = iconv.decode(Buffer.from(response.data), 'win1251');
       const $ = load(html);
-      const updatedText = $('.ref').text();      
-     
+      const updatedText = $('.ref').text();
+      
       const match = updatedText.match(/Обновлено: (\d{2})\.(\d{2})\.(\d{4}) в (\d{2}):(\d{2})/);
-      if (match && match[0]) {
-        const currentUpdateTime = match[0];
-        const currentHour = new Date().getHours();
-        const currentMinute = new Date().getMinutes();
-        
-        if (this.isFirstRun) {
-          console.log('First run detected - saving initial state');
-          this.lastUpdateTime = currentUpdateTime;
-          this.isFirstRun = false;
-          return;
-        }
-        
-        if (this.lastUpdateTime !== currentUpdateTime) {
-          console.log('New update detected');
-          this.lastUpdateTime = currentUpdateTime;
-          this.cacheService.clearAllScheduleCaches();
-          
-          const users = await UserPreferenceModel.find({ notifications: true });
-          
-          for (const user of users) {
-            if (this.scheduledTimer) {
-              clearTimeout(this.scheduledTimer);
-              this.scheduledTimer = null;
-            }
-
-            const [prefHour, prefMinute] = user.notificationTime.split(':').map(Number);
-            const now = new Date();
-            const scheduledTime = new Date(
-              now.getFullYear(),
-              now.getMonth(),
-              now.getDate(),
-              prefHour,
-              prefMinute,
-              0
-            );
-
-            if (currentHour > prefHour || (currentHour === prefHour && currentMinute >= prefMinute)) {
-              console.log(`After ${user.notificationTime} - checking and sending notifications immediately for user ${user.chatId}`);
-              await this.checkAndSendNotificationsForUser(user);
-            } else {
-              const timeUntilScheduled = scheduledTime.getTime() - now.getTime();
-              if (timeUntilScheduled > 0) {
-                console.log(`Scheduling notification for user ${user.chatId} at ${user.notificationTime}`);
-                this.scheduledTimer = setTimeout(async () => {
-                  try {
-                    await this.checkAndSendNotificationsForUser(user);
-                  } catch (error) {
-                    console.error('Error sending scheduled notification:', error);
-                  } finally {
-                    this.scheduledTimer = null;
-                  }
-                }, timeUntilScheduled);
-                console.log(`Notification scheduled for ${user.notificationTime} (in ${Math.round(timeUntilScheduled/1000/60)} minutes)`);
-              }
-            }
-          }
-        }
+      
+      if (!match?.[0]) return;
+      
+      const currentUpdateTime = match[0];
+      
+      if (this.isFirstRun) {
+        console.log('First run detected - saving initial state');
+        this.lastUpdateTime = currentUpdateTime;
+        this.isFirstRun = false;
+        return;
       }
+      
+      if (this.lastUpdateTime === currentUpdateTime+1) return;
+      
+      console.log('New update detected');
+      this.lastUpdateTime = currentUpdateTime;
+      this.cacheService.clearAllScheduleCaches();
+      
+      await this.scheduleNotificationsForAllUsers();
+      
     } catch (error) {
       console.error('Ошибка при проверке страницы:', error);
     } finally {
       this.isProcessing = false;
     }
+  }
+  
+  private async scheduleNotificationsForAllUsers(): Promise<void> {
+    const users = await UserPreferenceModel.find({ notifications: true });
+    
+    for (const user of users) {
+      await this.scheduleNotificationForUser(user);
+    }
+  }
+  
+  private async scheduleNotificationForUser(user: UserPreference): Promise<void> {
+    // Очищаем существующий таймер для пользователя, если есть
+    const existingTimer = this.userTimers.get(user.chatId);
+    if (existingTimer) {
+      clearTimeout(existingTimer);
+      this.userTimers.delete(user.chatId);
+    }
+    
+    const [prefHour, prefMinute] = user.notificationTime.split(':').map(Number);
+    const now = new Date();
+    const scheduledTime = new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      now.getDate(),
+      prefHour,
+      prefMinute,
+      0
+    );
+    
+    const currentHour = now.getHours();
+    const currentMinute = now.getMinutes();
+    
+    if (currentHour > prefHour || (currentHour === prefHour && currentMinute >= prefMinute)) {
+      console.log(`After ${user.notificationTime} - checking and sending notifications immediately for user ${user.chatId}`);
+      await this.checkAndSendNotificationsForUser(user);
+      return;
+    }
+    
+    const timeUntilScheduled = scheduledTime.getTime() - now.getTime();
+    if (timeUntilScheduled <= 0) return;
+    
+    console.log(`Scheduling notification for user ${user.chatId} at ${user.notificationTime}`);
+    
+    const timer = setTimeout(async () => {
+      try {
+        await this.checkAndSendNotificationsForUser(user);
+      } catch (error) {
+        console.error(`Error sending scheduled notification for user ${user.chatId}:`, error);
+      } finally {
+        this.userTimers.delete(user.chatId);
+      }
+    }, timeUntilScheduled);
+    
+    this.userTimers.set(user.chatId, timer);
+    console.log(`Notification scheduled for ${user.notificationTime} (in ${Math.round(timeUntilScheduled/1000/60)} minutes)`);
   }
 
   private async checkAndSendNotificationsForUser(user: any): Promise<void> {
@@ -164,51 +183,7 @@ export class NotificationService {
     } catch (error) {
       console.error(`Error processing schedule for chat ${user.chatId}:`, error);
     }
-  }
-
-  private async checkAndSendNotifications(): Promise<void> {
-    try {
-      const users = await UserPreferenceModel.find({ notifications: true });
-      const tomorrow = new Date();
-      tomorrow.setDate(tomorrow.getDate() + 1);
-      
-      for (const user of users) {
-        try {
-          const schedule = await this.scheduleParser.fetchSchedule(user.groupId, tomorrow);
-          const newScheduleHash = this.generateScheduleHash(schedule);
-          const previousHash = this.cacheService.getScheduleHash(user.chatId, tomorrow);
-
-          console.log(`Schedule check for user ${user.chatId}:`, {
-            hasSchedule: schedule.lessons.length > 0,
-            lessonsCount: schedule.lessons.length,
-            previousHashExists: !!previousHash,
-            hashesMatch: previousHash === newScheduleHash,
-            previousHash: previousHash,
-            newScheduleHash: newScheduleHash
-          });          
-          
-          if (previousHash !== newScheduleHash) {
-            console.log(`Sending notification to ${user.chatId} due to schedule changes`);
-            await this.sendNotification(user.chatId, schedule);
-            this.cacheService.setScheduleHash(user.chatId, tomorrow, newScheduleHash);
-          } else {
-            console.log(`No significant changes for chat ${user.chatId}`);
-          }
-        } catch (error) {
-          if (error instanceof Error) {
-            console.error(`Error processing schedule for chat ${user.chatId}:`, {
-              error: error.message,
-              stack: error.stack
-            });
-          } else {
-            console.error(`Unknown error for chat ${user.chatId}:`, error);
-          }         
-        }
-      }
-    } catch (error) {
-      console.error('Error in notification service:', error);
-    }
-  }
+  } 
 
   private async retry<T>(operation: () => Promise<T>, retries: number = 3): Promise<T> {
     try {
