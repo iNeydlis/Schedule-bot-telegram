@@ -96,7 +96,7 @@ export class NotificationService {
         return;
       }
       
-      if (this.lastUpdateTime === currentUpdateTime+1) return;
+      if (this.lastUpdateTime === currentUpdateTime) return;
       
       console.log('New update detected');
       this.lastUpdateTime = currentUpdateTime;
