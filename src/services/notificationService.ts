@@ -120,7 +120,6 @@ export class NotificationService {
   }
   
   private async scheduleNotificationForUser(user: UserPreference): Promise<void> {
-    // Очищаем существующий таймер для пользователя, если есть
     const existingTimer = this.userTimers.get(user.chatId);
     if (existingTimer) {
       clearTimeout(existingTimer);
