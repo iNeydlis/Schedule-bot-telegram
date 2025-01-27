@@ -19,6 +19,7 @@ export class ScheduleParser {
   
   private readonly teachersService: TeachersService;
   private readonly cacheService: CacheService;
+  private readonly htmlCache = new Map<string, string>();
 
   constructor() {
     this.teachersService = TeachersService.getInstance();
@@ -63,29 +64,33 @@ export class ScheduleParser {
     const cachedSchedule = this.cacheService.getSchedule(groupId, dateStr);
     if (cachedSchedule) return cachedSchedule;
 
-    const url = `${this.baseUrl}/cg${groupId}.htm`;
+    let html = this.htmlCache.get(groupId);
+    
+    if (!html) {
+      const url = `${this.baseUrl}/cg${groupId}.htm`;
+      try {
+        const response = await this.retry(() => this.axiosInstance.get(url));
+        
+        if (!response.data) {
+          throw new Error('Empty response received');
+        }
 
-    try {
-      const response = await this.retry(() => this.axiosInstance.get(url));
-      
-      if (!response.data) {
-        throw new Error('Empty response received');
+        html = iconv.decode(Buffer.from(response.data), 'win1251');
+        this.htmlCache.set(groupId, html);
+        
+      } catch (error) {
+        if (axios.isAxiosError(error)) {
+          const statusCode = error.response?.status;
+          const errorMessage = error.response?.statusText || error.message;
+          throw new Error(`Failed to fetch schedule: ${statusCode} ${errorMessage}`);
+        }
+        throw error;
       }
-
-      const html = iconv.decode(Buffer.from(response.data), 'win1251');
-      const schedule = await this.parseSchedule(html, date);
-      
-      this.cacheService.setSchedule(groupId, dateStr, schedule);
-      return schedule;
-
-    } catch (error) {
-      if (axios.isAxiosError(error)) {
-        const statusCode = error.response?.status;
-        const errorMessage = error.response?.statusText || error.message;
-        throw new Error(`Failed to fetch schedule: ${statusCode} ${errorMessage}`);
-      }
-      throw error;
     }
+
+    const schedule = await this.parseSchedule(html, date);
+    this.cacheService.setSchedule(groupId, dateStr, schedule);
+    return schedule;
   }
 
   private async parseSchedule(html: string, targetDate: Date): Promise<Schedule> {
@@ -97,12 +102,10 @@ export class ScheduleParser {
     const targetDateStr = this.formatDate(targetDate);
     const lessons: Lesson[] = [];
 
-    const dateRows = $('tr').filter((_, row) => {
-      const dateCell = $(row).find('td[align="center"]').first();
-      return dateCell.text().trim().includes(targetDateStr);
-    });
-
-    if (dateRows.length === 0) {
+    const dateSelector = `td[align="center"]:contains("${targetDateStr}")`;
+    const dateCell = $(dateSelector).first();
+    
+    if (!dateCell.length) {
       return {
         date: this.formatDate(targetDate),
         dayOfWeek: this.formatDayOfWeek(targetDate),
@@ -110,28 +113,37 @@ export class ScheduleParser {
       };
     }
 
-    const dateRow = dateRows.first();
-    
-    this.parseLessonFromRow($, dateRow, 1, lessons);
+    const dateRow = dateCell.parent('tr');
+    if (!dateRow.length) return {
+      date: this.formatDate(targetDate),
+      dayOfWeek: this.formatDayOfWeek(targetDate),
+      lessons: []
+    };
 
-    let currentRow = dateRow.next('tr');
-    for (let i = 1; currentRow.length && i < 6; i++) {
-      this.parseLessonFromRow($, currentRow, i + 1, lessons);
-      currentRow = currentRow.next('tr');
+    const lessonRows: cheerio.Cheerio[] = [];
+    lessonRows.push(dateRow);
+    
+    let currentRow = dateRow;
+    for (let i = 0; i < 5; i++) {
+      const nextRow = currentRow.next('tr');
+      if (!nextRow.length) break;
+      lessonRows.push(nextRow);
+      currentRow = nextRow;
     }
+
+    lessonRows.forEach((row, index) => {
+      this.parseLessonFromRow($, row, index + 1, lessons);
+    });
 
     return {
       date: this.formatDate(targetDate),
       dayOfWeek: this.formatDayOfWeek(targetDate),
-      lessons: lessons
+      lessons: lessons.filter(Boolean)
     };
   }
 
   private parseLessonFromRow($: cheerio.Root, $row: cheerio.Cheerio, number: number, lessons: Lesson[]): void {
-    const timeCell = $row.find('td.hd').filter((_, el) => {
-      return $(el).text().includes('Пара:');
-    });
-    
+    const timeCell = $row.find('td.hd:contains("Пара:")');
     const lessonCell = $row.find('td.ur');
     
     if (!timeCell.length || !lessonCell.length) return;
@@ -140,11 +152,11 @@ export class ScheduleParser {
     const timeMatch = timeText.match(TIME_REGEX);
     if (!timeMatch) return;
 
-    const subject = lessonCell.find('.z1').text().trim();
+    const subject = lessonCell.find('.z1').first().text().trim();
     if (!subject) return;
 
-    const shortTeacherName = lessonCell.find('.z3').text().trim();
-    const room = lessonCell.find('.z2').text().trim();
+    const shortTeacherName = lessonCell.find('.z3').first().text().trim();
+    const room = lessonCell.find('.z2').first().text().trim();
     const teacher = this.teachersService.getFullName(shortTeacherName);
 
     lessons.push({
@@ -162,5 +174,13 @@ export class ScheduleParser {
 
   private formatDayOfWeek(date: Date): string {
     return this.dayFormatter.format(date);
+  }
+
+  public clearHtmlCache(groupId?: string): void {
+    if (groupId) {
+      this.htmlCache.delete(groupId);
+    } else {
+      this.htmlCache.clear();
+    }
   }
 }
