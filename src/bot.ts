@@ -5,6 +5,9 @@ import { UserPreferenceModel } from './models/UserPreference';
 import { Schedule, Lesson } from './types';
 import { groupMap } from './groupMap';
 import { MessageManager } from './services/messageManager';
+import { TimeInputHandler } from './models/TimeInputHandler';
+
+const VERSION = '0.9.3 BETA';
 
 export class ScheduleBot {
   private bot: TelegramBot;
@@ -17,7 +20,7 @@ export class ScheduleBot {
     keyboard: [
       [{ text: "📅 Расписание" }, { text: "📆 Выбрать дату" }],
       [{ text: "👥 Сменить группу" }, { text: "🔔 Уведомления" }],
-      [{ text: "👤 Профиль" }, { text: "📋 Другая группа" }] 
+      [{ text: "👤 Статистика" }, { text: "📋 Другая группа" }]
     ],
     resize_keyboard: true,
     persistent: true
@@ -25,9 +28,9 @@ export class ScheduleBot {
 
   private botId: number | null = null;
   private botUsername: string | null = null;
-  
+
   constructor(token: string) {
-    this.bot = new TelegramBot(token, { 
+    this.bot = new TelegramBot(token, {
       polling: {
         interval: 300,
         params: {
@@ -40,13 +43,13 @@ export class ScheduleBot {
     this.notificationService = new NotificationService(this.bot, this.messageManager);
     this.dateMap = new Map();
     this.userSelectedDates = new Set();
-    
-   // Инициализируем информацию о боте
-   this.bot.getMe().then(botInfo => {
-    this.botId = botInfo.id;
-    this.botUsername = botInfo.username || null; // Явно приводим undefined к null
-    console.log('Bot initialized with ID:', this.botId, 'Username:', this.botUsername);
-  });
+
+    // Инициализируем информацию о боте
+    this.bot.getMe().then(botInfo => {
+      this.botId = botInfo.id;
+      this.botUsername = botInfo.username || null; // Явно приводим undefined к null
+      console.log('Bot initialized with ID:', this.botId, 'Username:', this.botUsername);
+    });
 
 
     this.initializeHandlers();
@@ -68,7 +71,7 @@ export class ScheduleBot {
         ...options,
         reply_markup: options.reply_markup || this.mainKeyboard
       };
-  
+
       const message = await this.bot.sendMessage(chatId, text, messageOptions);
       await this.messageManager.addBotMessage(this.bot, chatId, message.message_id);
     } catch (error) {
@@ -93,7 +96,7 @@ export class ScheduleBot {
       { command: '/schedule', description: 'Показать расписание' },
       { command: '/other', description: 'Посмотреть расписание другой группы' },
       { command: '/notifications', description: 'Управление уведомлениями' },
-      { command: '/profile', description: 'Показать профиль' },
+      { command: '/stats', description: 'Показать Статистика' },
       { command: '/help', description: 'Помощь по использованию бота' }
     ]);
   }
@@ -138,11 +141,19 @@ export class ScheduleBot {
     const isCommand = text?.startsWith('/');
     const mentionsBot = text && this.botUsername ? text.includes(`@${this.botUsername}`) : false;
 
+
     if (!text || !userId) return;
+    const currentState = await this.messageManager.getState(chatId);
+
+    if (currentState === 'awaiting_time') {
+      await this.handleTimeMessage(chatId, text);
+      await this.messageManager.setState(chatId, null);
+      return;
+    }
 
     if (isGroupChat) {
       const isReplyToBot = msg.reply_to_message?.from?.id === this.botId;
-      
+
       if (!isCommand && !mentionsBot && !isReplyToBot) {
         return;
       }
@@ -150,6 +161,7 @@ export class ScheduleBot {
       const cleanText = this.botUsername && mentionsBot
         ? text.replace(`@${this.botUsername}`, '').trim()
         : text.trim();
+
 
       switch (cleanText) {
         case '/start':
@@ -162,11 +174,11 @@ export class ScheduleBot {
         case '/other':
         case '📋 Другая группа':
           await this.handleOtherSchedule(msg);
-        break;
-        case '/profile':
-        case '👤 Профиль':
-          await this.handleProfile(msg);
-        break;
+          break;
+        case '/stats':
+        case '👤 Статистика':
+          await this.handleStats(msg);
+          break;
         case '/notifications':
         case '🔔 Уведомления':
           await this.handleNotifications(msg);
@@ -179,7 +191,7 @@ export class ScheduleBot {
           break;
         case '👥 Сменить группу':
           await this.sendGroupSelection(chatId, userId, isGroupChat);
-          break;        
+          break;
         default:
           if (this.isGroupInput(cleanText)) {
             const state = await this.messageManager.getState(chatId);
@@ -188,6 +200,11 @@ export class ScheduleBot {
             } else {
               await this.handleGroupInput(msg, cleanText);
             }
+
+          }
+          else if (currentState === 'awaiting_time') {
+            await this.handleTimeMessage(chatId, text);
+            await this.messageManager.setState(chatId, null);
           }
       }
     } else {
@@ -202,11 +219,11 @@ export class ScheduleBot {
         case '/other':
         case '📋 Другая группа':
           await this.handleOtherSchedule(msg);
-        break;
-        case '/profile':
-        case '👤 Профиль':
-            await this.handleProfile(msg);
-            break;
+          break;
+        case '/stats':
+        case '👤 Статистика':
+          await this.handleStats(msg);
+          break;
         case '/notifications':
         case '🔔 Уведомления':
           await this.handleNotifications(msg);
@@ -229,128 +246,192 @@ export class ScheduleBot {
               await this.handleGroupInput(msg, text);
             }
           }
+          else if (currentState === 'awaiting_time') {
+            await this.handleTimeMessage(chatId, text);
+            await this.messageManager.setState(chatId, null);
+          }
       }
     }
   }
 
-  private async handleProfile(msg: TelegramBot.Message): Promise<void> {
+  private async handleStats(msg: TelegramBot.Message): Promise<void> {
     const chatId = msg.chat.id;
     const userId = msg.from?.id;
-    const isGroupChat = msg.chat.type === 'group' || msg.chat.type === 'supergroup';
-  
-    if (!userId) return;
-  
+
     try {
-      const userPref = await UserPreferenceModel.findOne({
-        $or: [
-          { userId, chatId },
-          { groupChatId: chatId }
-        ]
+      const [userPref, totalUsers, activeNotifications, groupPreferences] = await Promise.all([
+        UserPreferenceModel.findOne({
+          $or: [
+            { userId, chatId },
+            { groupChatId: chatId }
+          ]
+        }),
+        UserPreferenceModel.countDocuments({ isGroupChat: false }),
+        UserPreferenceModel.countDocuments({ notifications: true }),
+        UserPreferenceModel.find({ isGroupChat: true })
+      ]);
+
+
+      const groupName = userPref?.groupId
+        ? Object.entries(groupMap).find(([_, value]) => value === userPref.groupId)?.[0] || 'Неизвестная группа'
+        : 'Не выбрана';
+
+      const activeGroupsPromises = groupPreferences.map(async group => {
+        try {
+          const chatInfo = await this.bot.getChat(group.chatId);
+          if (chatInfo.type === 'group' || chatInfo.type === 'supergroup') {
+            return group;
+          }
+        } catch (error) {
+          await UserPreferenceModel.deleteOne({ chatId: group.chatId })
+            .catch(err => console.error(`Error deleting inactive group ${group.chatId}:`, err));
+          console.log(`Removed inactive group ${group.chatId}`);
+        }
+        return null;
       });
-  
-      if (!userPref) {
-        await this.sendBotMessage(
-          chatId,
-          '⚠️ Профиль не настроен. Используйте /start для настройки.'
-        );
-        return;
-      }
-  
-      const groupName = Object.entries(groupMap).find(
-        ([_, value]) => value === userPref.groupId
-      )?.[0] || 'Неизвестная группа';
-  
-      let profileMessage = '👤 <b>Профиль</b>\n\n';
-      
-      if (isGroupChat) {
-        profileMessage += '📚 <b>Информация о чате:</b>\n';
-      } else {
-        profileMessage += '📚 <b>Ваша информация:</b>\n';
-      }
-      
-      profileMessage += `• Группа: ${groupName}\n`;
-      profileMessage += `• Уведомления: ${userPref.notifications ? '✅ Включены' : '❌ Выключены'}\n`;
-      
-      if (isGroupChat) {        
-        const isAdmin = await this.isUserAdmin(chatId, userId);
-        profileMessage += `• Права администратора: ${isAdmin ? '✅ Есть' : '❌ Нет'}\n`;
-      }        
-  
-      await this.sendBotMessage(chatId, profileMessage, {
-        parse_mode: 'HTML'
+
+      const activeGroups = (await Promise.all(activeGroupsPromises)).filter(Boolean);
+      const statsMessage = this.buildStatsMessage({
+        groupName,
+        userPref,
+        totalUsers,
+        activeGroups: activeGroups.length,
+        activeNotifications
       });
-  
+
+      await this.sendBotMessage(chatId, statsMessage, {
+        parse_mode: 'HTML',
+        disable_web_page_preview: true
+      });
     } catch (error) {
-      console.error('Error in handleProfile:', error);
+      console.error('Error in handleStats:', error);
       await this.sendBotMessage(
         chatId,
-        'Произошла ошибка при получении профиля. Попробуйте позже.'
+        'Произошла ошибка при получении статистики. Попробуйте позже.'
       );
     }
+  }
+
+  private buildStatsMessage({
+    groupName,
+    userPref,
+    totalUsers,
+    activeGroups,
+    activeNotifications
+  }: {
+    groupName: string;
+    userPref?: any;
+    totalUsers: number;
+    activeGroups: number;
+    activeNotifications: number;
+  }): string {
+    const sections = [
+      {
+        title: '👥 <b>Текущая группа:</b>',
+        content: [
+          `• Группа: ${groupName}`,
+          userPref && `• Уведомления: ${userPref.notifications ? '✅ Включены' : '❌ Выключены'}`,
+          userPref && `• Время уведомлений: ${userPref.notificationTime || 'Не установлено'}`
+        ].filter(Boolean)
+      },
+      {
+        title: '\n📈 <b>Общая информация:</b>',
+        content: [
+          `• Личных чатов: ${totalUsers.toLocaleString()}`,
+          `• Активных групповых чатов: ${activeGroups.toLocaleString()}`
+        ]
+      },
+      {
+        title: '\n🔔 <b>Уведомления:</b>',
+        content: [`• Активных подписок: ${activeNotifications.toLocaleString()}`]
+      },
+      {
+        title: '\n📱 <b>Информация о боте:</b>',
+        content: [
+          `• Версия: ${VERSION}`,
+          '• GitHub: <a href="https://github.com/iNeydlis/Schedule-bot-telegram">Schedule Bot</a>'
+        ]
+      },
+      {
+        title: '\n💡 <b>Возможности:</b>',
+        content: [
+          '• Просмотр расписания',
+          '• Уведомления об изменениях',
+          '• Поддержка групповых чатов',
+          '• Навигация по датам'
+        ]
+      }
+    ];
+
+    return ['\n📊 <b>Статистика бота</b>\n']
+      .concat(sections.map(section =>
+        `\n${section.title}\n${section.content.join('\n')}`
+      ))
+      .join('');
   }
 
   private async handleOtherGroupSchedule(msg: TelegramBot.Message, groupName: string): Promise<void> {
     const chatId = msg.chat.id;
     const groupNameNormalized = groupName.toUpperCase();
- 
+
     if (groupMap[groupNameNormalized]) {
-        const groupId = groupMap[groupNameNormalized];
-        await this.messageManager.setState(chatId, null);
-     
-        try {
-            // Получаем текущую дату только если нет сохраненной даты или флага выбранной даты
-            let currentDate = this.userSelectedDates.has(chatId)
-                ? (this.dateMap.get(chatId) || new Date())
-                : new Date();
-            
-            let schedule = await this.scheduleParser.fetchSchedule(groupId, currentDate);
-            
-            // Ищем следующий доступный день только если нет флага выбранной даты
-            if (!this.userSelectedDates.has(chatId) && (!schedule.lessons || schedule.lessons.length === 0)) {
-                currentDate = await this.findNextAvailableDay(currentDate, groupId);
-                this.dateMap.set(chatId, currentDate);
-                schedule = await this.scheduleParser.fetchSchedule(groupId, currentDate);
-            }
-            
-            const formattedSchedule = this.formatFullSchedule(schedule, `Группа ${groupName}`);
+      const groupId = groupMap[groupNameNormalized];
+      await this.messageManager.setState(chatId, null);
 
-            // Создаем отдельные объекты для inline и regular клавиатур
-            const inlineKeyboard: TelegramBot.InlineKeyboardMarkup = {
-                inline_keyboard: [
-                    [
-                        { text: "⬅️ Предыдущий день", callback_data: "prev_day" },
-                        { text: "Следующий день ➡️", callback_data: "next_day" }
-                    ]
-                ]
-            };
-            
+      try {
+        // Получаем текущую дату только если нет сохраненной даты или флага выбранной даты
+        let currentDate = this.userSelectedDates.has(chatId)
+          ? (this.dateMap.get(chatId) || new Date())
+          : new Date();
 
-            // Отправляем сообщение с обеими клавиатурами
-            const message = await this.bot.sendMessage(chatId, formattedSchedule, {
-                parse_mode: 'HTML',
-                reply_markup: { 
-                    ...inlineKeyboard,
-                    ...this.mainKeyboard 
-                }
-            });
+        let schedule = await this.scheduleParser.fetchSchedule(groupId, currentDate);
 
-            if (message) {
-                await this.messageManager.addBotMessage(this.bot, chatId, message.message_id);
-            }
-        } catch (error) {
-            console.error('Error fetching other group schedule:', error);
-            await this.sendBotMessage(
-                chatId,
-                'Произошла ошибка при получении расписания. Попробуйте позже.'
-            );
+        // Ищем следующий доступный день только если нет флага выбранной даты
+        if (!this.userSelectedDates.has(chatId) && (!schedule.lessons || schedule.lessons.length === 0)) {
+          currentDate = await this.findNextAvailableDay(currentDate, groupId);
+          this.dateMap.set(chatId, currentDate);
+          schedule = await this.scheduleParser.fetchSchedule(groupId, currentDate);
         }
-    } else {
+
+        const formattedSchedule = this.formatFullSchedule(schedule, `Группа ${groupName}`);
+
+        // Создаем отдельные объекты для inline и regular клавиатур
+        const inlineKeyboard: TelegramBot.InlineKeyboardMarkup = {
+          inline_keyboard: [
+            [
+              { text: "⬅️ Предыдущий день", callback_data: "prev_day" },
+              { text: "Следующий день ➡️", callback_data: "next_day" }
+            ]
+          ]
+        };
+
+
+        // Отправляем сообщение с обеими клавиатурами
+        const message = await this.bot.sendMessage(chatId, formattedSchedule, {
+          parse_mode: 'HTML',
+          reply_markup: {
+            ...inlineKeyboard,
+            ...this.mainKeyboard
+          }
+        });
+
+        if (message) {
+          await this.messageManager.addBotMessage(this.bot, chatId, message.message_id);
+        }
+      } catch (error) {
+        console.error('Error fetching other group schedule:', error);
         await this.sendBotMessage(
-            chatId,
-            `Группа "${groupName}" не найдена. Попробуйте снова.`
+          chatId,
+          'Произошла ошибка при получении расписания. Попробуйте позже.'
         );
+      }
+    } else {
+      await this.sendBotMessage(
+        chatId,
+        `Группа "${groupName}" не найдена. Попробуйте снова.`
+      );
     }
-}
+  }
 
   private async handleHelp(msg: TelegramBot.Message): Promise<void> {
     const helpText = `
@@ -361,7 +442,7 @@ export class ScheduleBot {
 • /schedule - Показать расписание
 • /other - Посмотреть расписание другой группы
 • /notifications - Управление уведомлениями
-• /profile - Показать информацию о профиле
+• /stats - Показать статистику бота
 • /help - Показать это сообщение
 
 📱 <b>Основные кнопки меню:</b>
@@ -369,7 +450,12 @@ export class ScheduleBot {
 • 📆 Выбрать дату - Выбрать конкретную дату
 • 👥 Сменить группу - Изменить текущую группу
 • 🔔 Уведомления - Включить/выключить уведомления
-• 👤 Профиль - Показать информацию о профиле
+• 👤 Статистика - Показать информацию о статистике ботв
+
+🔔 <b>Система уведомлений:</b>
+• Уведомления приходят автоматически после обновления расписания на следующий день
+• При повторном изменении расписания вы получите дополнительное уведомление, если будут отличия в парах
+• Возможность отложить уведомления до определенного времени(по умолчанию все уведомления приходят после 15:00)
 
 💡 <b>Как пользоваться в групповом чате:</b>
 • Добавьте бота в группу как администратора
@@ -407,12 +493,12 @@ export class ScheduleBot {
 
     if (!userId) return;
 
-    const welcomeMessage = isGroupChat 
+    const welcomeMessage = isGroupChat
       ? "Привет! Я бот для отслеживания расписания. Для начала работы администратор группы должен выбрать группу."
       : "Привет! Я бот для отслеживания расписания. Давай начнем с выбора твоей группы.";
 
     await this.sendBotMessage(chatId, welcomeMessage);
-    
+
     if (!isGroupChat || await this.isUserAdmin(chatId, userId)) {
       await this.sendGroupSelection(chatId, userId, isGroupChat);
     }
@@ -430,12 +516,12 @@ export class ScheduleBot {
 
   private async handleOtherSchedule(msg: TelegramBot.Message): Promise<void> {
     const chatId = msg.chat.id;
-    
+
     await this.sendBotMessage(
       chatId,
       "Введите номер группы, расписание которой хотите посмотреть (например, 1521-2):"
     );
-    
+
     await this.messageManager.setState(chatId, 'awaiting_other_group');
   }
 
@@ -445,7 +531,7 @@ export class ScheduleBot {
 
     if (!userId) return;
 
-    const userPref = await UserPreferenceModel.findOne({ 
+    const userPref = await UserPreferenceModel.findOne({
       $or: [
         { userId, chatId },
         { groupChatId: chatId }
@@ -462,57 +548,57 @@ export class ScheduleBot {
     } else {
       await this.sendGroupSelection(chatId, userId, msg.chat.type !== 'private');
     }
-}
+  }
 
-private async sendSchedule(chatId: number, groupId: string): Promise<void> {
-  try {
+  private async sendSchedule(chatId: number, groupId: string): Promise<void> {
+    try {
       // Получаем текущую дату только если нет сохраненной даты или флага выбранной даты
       let currentDate = this.userSelectedDates.has(chatId)
-          ? (this.dateMap.get(chatId) || new Date())
-          : new Date();
-      
+        ? (this.dateMap.get(chatId) || new Date())
+        : new Date();
+
       let schedule = await this.scheduleParser.fetchSchedule(groupId, currentDate);
-      
+
       // Ищем следующий доступный день только если нет флага выбранной даты
       if (!this.userSelectedDates.has(chatId) && (!schedule.lessons || schedule.lessons.length === 0)) {
-          currentDate = await this.findNextAvailableDay(currentDate, groupId);
-          this.dateMap.set(chatId, currentDate);
-          schedule = await this.scheduleParser.fetchSchedule(groupId, currentDate);
+        currentDate = await this.findNextAvailableDay(currentDate, groupId);
+        this.dateMap.set(chatId, currentDate);
+        schedule = await this.scheduleParser.fetchSchedule(groupId, currentDate);
       }
       const formattedSchedule = this.formatFullSchedule(schedule);
 
       // Создаем отдельные объекты для inline и regular клавиатур
       const inlineKeyboard: TelegramBot.InlineKeyboardMarkup = {
-          inline_keyboard: [
-              [
-                  { text: "⬅️ Предыдущий день", callback_data: "prev_day" },
-                  { text: "Следующий день ➡️", callback_data: "next_day" }
-              ]
+        inline_keyboard: [
+          [
+            { text: "⬅️ Предыдущий день", callback_data: "prev_day" },
+            { text: "Следующий день ➡️", callback_data: "next_day" }
           ]
+        ]
       };
 
-      
+
 
       // Отправляем сообщение с обеими клавиатурами
       const message = await this.bot.sendMessage(chatId, formattedSchedule, {
-          parse_mode: 'HTML',
-          reply_markup: { 
-              ...inlineKeyboard,
-              ...this.mainKeyboard 
-          }
+        parse_mode: 'HTML',
+        reply_markup: {
+          ...inlineKeyboard,
+          ...this.mainKeyboard
+        }
       });
 
       if (message) {
-          await this.messageManager.addBotMessage(this.bot, chatId, message.message_id);
+        await this.messageManager.addBotMessage(this.bot, chatId, message.message_id);
       }
-  } catch (error) {
+    } catch (error) {
       console.error('Error sending schedule:', error);
       await this.sendBotMessage(
-          chatId,
-          'Произошла ошибка при получении расписания. Попробуйте позже.'
+        chatId,
+        'Произошла ошибка при получении расписания. Попробуйте позже.'
       );
+    }
   }
-}
 
   private async handleNotifications(msg: TelegramBot.Message): Promise<void> {
     const chatId = msg.chat.id;
@@ -533,20 +619,42 @@ private async sendSchedule(chatId: number, groupId: string): Promise<void> {
       ]
     });
 
-    if (userPref) {
-      userPref.notifications = !userPref.notifications;
-      await userPref.save();
-      
-      await this.sendBotMessage(
-        chatId,
-        `🔔 Уведомления ${userPref.notifications ? 'включены' : 'выключены'}`
-      );
-    } else {
+    if (!userPref) {
       await this.sendBotMessage(
         chatId,
         'Сначала выберите группу с помощью команды /start'
       );
+      return;
     }
+
+    const notificationStatus = userPref.notifications ? '✅ Включены' : '❌ Выключены';
+    const message = `🔔 <b>Настройки уведомлений</b>\n\n` +
+      `Статус: ${notificationStatus}\n` +
+      `Время отправки: после ${userPref.notificationTime}\n` +
+      'Подробнее об уведомлениях: /help'
+      ;
+
+    const keyboard = {
+      inline_keyboard: [
+        [
+          {
+            text: userPref.notifications ? '🔕 Выключить' : '🔔 Включить',
+            callback_data: 'toggle_notifications'
+          }
+        ],
+        [
+          { text: '⏰ Изменить время', callback_data: 'change_time' }
+        ],
+        [
+          { text: '📅 Показать расписание', callback_data: 'show_schedule' }
+        ]
+      ]
+    };
+
+    await this.sendBotMessage(chatId, message, {
+      parse_mode: 'HTML',
+      reply_markup: keyboard
+    });
   }
 
   private isGroupInput(text: string): boolean {
@@ -586,186 +694,186 @@ private async sendSchedule(chatId: number, groupId: string): Promise<void> {
     }
 
     await this.sendBotMessage(
-      chatId, 
-      isGroupChat 
+      chatId,
+      isGroupChat
         ? "Введите номер группы для всего чата (например, 1521-2):"
         : "Введите вашу группу (например, 1521-2):"
     );
   }
 
   private async saveUserGroup(
-    userId: number, 
-    chatId: number, 
-    groupId: string, 
+    userId: number,
+    chatId: number,
+    groupId: string,
     isGroupChat: boolean
-): Promise<void> {
+  ): Promise<void> {
     try {
-        const query = isGroupChat ? { groupChatId: chatId } : { userId, chatId };
-        const updateData = {
-            userId,
-            chatId,
-            groupId,
-            isGroupChat,
-            ...(isGroupChat && { groupChatId: chatId }),
-            updatedAt: new Date()
-        };
+      const query = isGroupChat ? { groupChatId: chatId } : { userId, chatId };
+      const updateData = {
+        userId,
+        chatId,
+        groupId,
+        isGroupChat,
+        ...(isGroupChat && { groupChatId: chatId }),
+        updatedAt: new Date()
+      };
 
-        console.log('Saving user group:', { query, updateData });
+      console.log('Saving user group:', { query, updateData });
 
-        const result = await UserPreferenceModel.findOneAndUpdate(
-            query,
-            updateData,
-            { upsert: true, new: true }
-        );
-
-        console.log('Save result:', result);
-    } catch (error) {
-        console.error('Error saving user group:', error);
-        throw error;
-    }
-}
-
-private async handleDayNavigation(chatId: number, userId: number, direction: string): Promise<void> {
-  const userPref = await UserPreferenceModel.findOne({
-    $or: [
-      { userId, chatId },
-      { groupChatId: chatId }
-    ]
-  });
-  
-  if (!userPref) return;
-
-  try {
-    // Используем chatId вместо userId для получения текущей даты
-    const currentDate = this.dateMap.get(chatId) || new Date();
-    
-    const nextDate = new Date(currentDate);
-    do {
-      if (direction === 'next_day') {
-        nextDate.setDate(nextDate.getDate() + 1);
-      } else {
-        nextDate.setDate(nextDate.getDate() - 1);
-      }
-    } while (nextDate.getDay() === 0 || nextDate.getDay() === 6);
-
-    const schedule = await this.scheduleParser.fetchSchedule(userPref.groupId, nextDate);
-    
-    if (schedule.lessons && schedule.lessons.length > 0) {
-      // Сохраняем дату используя chatId
-      this.dateMap.set(chatId, nextDate);
-      await this.sendSchedule(chatId, userPref.groupId);
-    } else {
-      const nextAvailableDate = await this.findNextAvailableDay(
-        nextDate,
-        userPref.groupId,
-        direction === 'next_day' ? 'forward' : 'backward'
+      const result = await UserPreferenceModel.findOneAndUpdate(
+        query,
+        updateData,
+        { upsert: true, new: true }
       );
-      
-      // Сохраняем дату используя chatId
-      this.dateMap.set(chatId, nextAvailableDate);
-      await this.sendSchedule(chatId, userPref.groupId);
+
+      console.log('Save result:', result);
+    } catch (error) {
+      console.error('Error saving user group:', error);
+      throw error;
     }
-
-  } catch (error) {
-    console.error('Error in handleDayNavigation:', error);
-    await this.sendBotMessage(
-      chatId,
-      'Произошла ошибка при поиске расписания. Попробуйте позже.'
-    );
   }
-}
 
-private async getNextTwoWeeks(): Promise<Date[]> {
-  const dates: Date[] = [];
-  const today = new Date();
-  
-  // Начинаем с текущего дня
-  const startDate = new Date(today);
-  const currentDayOfWeek = startDate.getDay();
-  const daysUntilEndOfWeek = 7 - currentDayOfWeek;
-  
-  // Собираем все даты
-  const allDates: Date[] = [];
-  
-  // Добавляем дни текущей недели
-  for (let i = 0; i <= daysUntilEndOfWeek; i++) {
-    const date = new Date(startDate);
-    date.setDate(date.getDate() + i);
-    allDates.push(date);
-  }
-  
-  // Находим следующий понедельник
-  const nextMonday = new Date(startDate);
-  nextMonday.setDate(startDate.getDate() + (8 - currentDayOfWeek));
-  
-  // Добавляем дни следующей недели
-  for (let i = 0; i < 7; i++) {
-    const date = new Date(nextMonday);
-    date.setDate(date.getDate() + i);
-    allDates.push(date);
-  }
-  
-  return allDates;
-}
-
-private async sendDateSelection(chatId: number): Promise<void> {
-  try {
-    // Получаем пользовательские настройки для определения группы
+  private async handleDayNavigation(chatId: number, userId: number, direction: string): Promise<void> {
     const userPref = await UserPreferenceModel.findOne({
       $or: [
-        { chatId },
+        { userId, chatId },
         { groupChatId: chatId }
       ]
     });
 
-    if (!userPref) {
-      await this.sendBotMessage(chatId, "Сначала выберите группу с помощью команды /start");
-      return;
-    }
+    if (!userPref) return;
 
-    const dates = await this.getNextTwoWeeks();
-    const dateButtons: { date: Date; hasLessons: boolean }[] = [];
+    try {
+      // Используем chatId вместо userId для получения текущей даты
+      const currentDate = this.dateMap.get(chatId) || new Date();
 
-    // Проверяем наличие пар для каждой даты
-    for (const date of dates) {
-      try {
-        const schedule = await this.scheduleParser.fetchSchedule(userPref.groupId, date);
-        const hasLessons = schedule.lessons && schedule.lessons.length > 0;
-        dateButtons.push({ date, hasLessons });
-      } catch (error) {
-        console.error(`Error fetching schedule for date ${date}:`, error);
-        dateButtons.push({ date, hasLessons: false });
+      const nextDate = new Date(currentDate);
+      do {
+        if (direction === 'next_day') {
+          nextDate.setDate(nextDate.getDate() + 1);
+        } else {
+          nextDate.setDate(nextDate.getDate() - 1);
+        }
+      } while (nextDate.getDay() === 0 || nextDate.getDay() === 6);
+
+      const schedule = await this.scheduleParser.fetchSchedule(userPref.groupId, nextDate);
+
+      if (schedule.lessons && schedule.lessons.length > 0) {
+        // Сохраняем дату используя chatId
+        this.dateMap.set(chatId, nextDate);
+        await this.sendSchedule(chatId, userPref.groupId);
+      } else {
+        const nextAvailableDate = await this.findNextAvailableDay(
+          nextDate,
+          userPref.groupId,
+          direction === 'next_day' ? 'forward' : 'backward'
+        );
+
+        // Сохраняем дату используя chatId
+        this.dateMap.set(chatId, nextAvailableDate);
+        await this.sendSchedule(chatId, userPref.groupId);
       }
+
+    } catch (error) {
+      console.error('Error in handleDayNavigation:', error);
+      await this.sendBotMessage(
+        chatId,
+        'Произошла ошибка при поиске расписания. Попробуйте позже.'
+      );
+    }
+  }
+
+  private async getNextTwoWeeks(): Promise<Date[]> {
+    const dates: Date[] = [];
+    const today = new Date();
+
+    // Начинаем с текущего дня
+    const startDate = new Date(today);
+    const currentDayOfWeek = startDate.getDay();
+    const daysUntilEndOfWeek = 7 - currentDayOfWeek;
+
+    // Собираем все даты
+    const allDates: Date[] = [];
+
+    // Добавляем дни текущей недели
+    for (let i = 0; i <= daysUntilEndOfWeek; i++) {
+      const date = new Date(startDate);
+      date.setDate(date.getDate() + i);
+      allDates.push(date);
     }
 
-    const keyboard = {
-      inline_keyboard: dateButtons.map(({ date, hasLessons }) => [{
-        text: this.formatDateButton(date, hasLessons),
-        callback_data: `date_${date.toISOString()}`
-      }])
-    };
+    // Находим следующий понедельник
+    const nextMonday = new Date(startDate);
+    nextMonday.setDate(startDate.getDate() + (8 - currentDayOfWeek));
 
-    await this.sendBotMessage(
-      chatId,
-      "Выберите дату:\n📚 - есть пары\n⭕️ - нет пар",
-      { reply_markup: keyboard }
-    );
-  } catch (error) {
-    console.error('Error in sendDateSelection:', error);
-    await this.sendBotMessage(
-      chatId,
-      'Произошла ошибка при загрузке дат. Попробуйте позже.'
-    );
+    // Добавляем дни следующей недели
+    for (let i = 0; i < 7; i++) {
+      const date = new Date(nextMonday);
+      date.setDate(date.getDate() + i);
+      allDates.push(date);
+    }
+
+    return allDates;
   }
-}
 
-private formatDateButton(date: Date, hasLessons: boolean): string {
-  const days = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'];
-  const dayOfWeek = days[date.getDay()];
-  const dateText = date.toLocaleDateString('ru-RU');
-  const icon = hasLessons ? '📚' : '⭕️';
-  return `${dateText} (${dayOfWeek}) ${icon}`;
-}
+  private async sendDateSelection(chatId: number): Promise<void> {
+    try {
+      // Получаем пользовательские настройки для определения группы
+      const userPref = await UserPreferenceModel.findOne({
+        $or: [
+          { chatId },
+          { groupChatId: chatId }
+        ]
+      });
+
+      if (!userPref) {
+        await this.sendBotMessage(chatId, "Сначала выберите группу с помощью команды /start");
+        return;
+      }
+
+      const dates = await this.getNextTwoWeeks();
+      const dateButtons: { date: Date; hasLessons: boolean }[] = [];
+
+      // Проверяем наличие пар для каждой даты
+      for (const date of dates) {
+        try {
+          const schedule = await this.scheduleParser.fetchSchedule(userPref.groupId, date);
+          const hasLessons = schedule.lessons && schedule.lessons.length > 0;
+          dateButtons.push({ date, hasLessons });
+        } catch (error) {
+          console.error(`Error fetching schedule for date ${date}:`, error);
+          dateButtons.push({ date, hasLessons: false });
+        }
+      }
+
+      const keyboard = {
+        inline_keyboard: dateButtons.map(({ date, hasLessons }) => [{
+          text: this.formatDateButton(date, hasLessons),
+          callback_data: `date_${date.toISOString()}`
+        }])
+      };
+
+      await this.sendBotMessage(
+        chatId,
+        "Выберите дату:\n📚 - есть пары\n⭕️ - нет пар",
+        { reply_markup: keyboard }
+      );
+    } catch (error) {
+      console.error('Error in sendDateSelection:', error);
+      await this.sendBotMessage(
+        chatId,
+        'Произошла ошибка при загрузке дат. Попробуйте позже.'
+      );
+    }
+  }
+
+  private formatDateButton(date: Date, hasLessons: boolean): string {
+    const days = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'];
+    const dayOfWeek = days[date.getDay()];
+    const dateText = date.toLocaleDateString('ru-RU');
+    const icon = hasLessons ? '📚' : '⭕️';
+    return `${dateText} (${dayOfWeek}) ${icon}`;
+  }
 
   private async handleCallbackQuery(query: TelegramBot.CallbackQuery): Promise<void> {
     if (!query.message || !query.from.id) return;
@@ -778,6 +886,21 @@ private formatDateButton(date: Date, hasLessons: boolean): string {
 
     try {
       switch (true) {
+        case data === 'toggle_notifications':
+          await this.toggleNotifications(chatId, userId);
+          break;
+        case data === 'change_time':
+          await this.sendTimeSelectionMenu(chatId, userId);
+          break;
+        case data.startsWith('set_time_'):
+          await this.setNotificationTime(chatId, data.split('_')[2]);
+          break;
+        case data === 'show_schedule':
+          await this.handleSchedule({
+            ...query.message,
+            from: { id: userId }
+          } as TelegramBot.Message);
+          break;
         case data.startsWith('date_'):
           await this.handleDateSelection(chatId, userId, data.replace('date_', ''));
           break;
@@ -787,13 +910,101 @@ private formatDateButton(date: Date, hasLessons: boolean): string {
           break;
       }
 
-      await this.bot.answerCallbackQuery(query.id);
+      try {
+        await this.bot.answerCallbackQuery(query.id);
+      } catch (callbackError: any) {
+        if (!callbackError.message?.includes('query is too old')) {
+          console.error('Error answering callback query:', callbackError);
+        }
+      }
     } catch (error) {
       console.error('Error handling callback query:', error);
       await this.sendBotMessage(chatId, 'Произошла ошибка. Попробуйте позже.');
-      await this.bot.answerCallbackQuery(query.id);
+
+
+      try {
+        await this.bot.answerCallbackQuery(query.id);
+      } catch {
+
+      }
     }
   }
+
+  private async toggleNotifications(chatId: number, userId: number): Promise<void> {
+    const userPref = await UserPreferenceModel.findOne({
+      $or: [
+        { userId, chatId },
+        { groupChatId: chatId }
+      ]
+    });
+
+    if (userPref) {
+      userPref.notifications = !userPref.notifications;
+      await userPref.save();
+      await this.handleNotifications({ chat: { id: chatId }, from: { id: userId } } as TelegramBot.Message);
+    }
+  }
+
+  private async handleTimeMessage(chatId: number, messageText: string): Promise<void> {
+    try {
+      console.log('Handling time message:', messageText); // Add logging
+      const parsedTime = TimeInputHandler.parseTimeInput(messageText);
+
+      if (!parsedTime.isValid) {
+        await this.sendBotMessage(
+          chatId,
+          `❌ ${parsedTime.errorMessage}\n\nПожалуйста, введите время в формате:\n- 14:30\n- 14.30\n- 14 30\n- 1430`
+        );
+        return;
+      }
+
+      const formattedTime = `${parsedTime.hour.toString().padStart(2, '0')}:${parsedTime.minute.toString().padStart(2, '0')}`;
+      await this.setNotificationTime(chatId, formattedTime);
+
+      await this.messageManager.setState(chatId, null);
+    } catch (error) {
+      console.error('Error in handleTimeMessage:', error);
+      await this.sendBotMessage(
+        chatId,
+        'Произошла ошибка при установке времени. Попробуйте позже.'
+      );
+    }
+  }
+
+  private async sendTimeSelectionMenu(chatId: number, userId: number): Promise<void> {
+    try {
+      await this.messageManager.setState(chatId, 'awaiting_time');
+      await this.sendBotMessage(
+        chatId,
+        '⏰ Введите желаемое время для получения уведомлений (например, 15:00):'
+      );
+    } catch (error) {
+      console.error('Error in sendTimeSelectionMenu:', error);
+      await this.sendBotMessage(
+        chatId,
+        'Произошла ошибка. Попробуйте позже.'
+      );
+    }
+  }
+
+  private async setNotificationTime(chatId: number, time: string): Promise<void> {
+    const userPref = await UserPreferenceModel.findOne({
+      $or: [
+        { chatId },
+        { groupChatId: chatId }
+      ]
+    });
+
+    if (userPref) {
+      userPref.notificationTime = time;
+      await userPref.save();
+      await this.sendBotMessage(
+        chatId,
+        `✅ Время уведомлений установлено на ${time}`
+      );
+    }
+  }
+
   private async handleDateSelection(chatId: number, userId: number, dateStr: string): Promise<void> {
     const userPref = await UserPreferenceModel.findOne({
       $or: [
@@ -809,7 +1020,7 @@ private formatDateButton(date: Date, hasLessons: boolean): string {
     this.dateMap.set(chatId, selectedDate);
     this.userSelectedDates.add(chatId);
     await this.sendSchedule(chatId, userPref.groupId);
-}
+  }
 
   private async findNextAvailableDay(
     startDate: Date,
@@ -848,7 +1059,7 @@ private formatDateButton(date: Date, hasLessons: boolean): string {
 
         if (datesToCheck.length === 0) break;
 
-        const schedulePromises = datesToCheck.map(date => 
+        const schedulePromises = datesToCheck.map(date =>
           this.scheduleParser.fetchSchedule(groupId, date)
         );
 
@@ -873,13 +1084,13 @@ private formatDateButton(date: Date, hasLessons: boolean): string {
 
   private formatFullSchedule(schedule: Schedule, groupTitle?: string): string {
     const hasLessons = schedule.lessons && Array.isArray(schedule.lessons) && schedule.lessons.length > 0;
-    
+
     let message = '';
     if (groupTitle) {
       message += `👥 <b>${groupTitle}</b>\n`;
     }
     message += `📅 <b>${schedule.date} (${schedule.dayOfWeek})</b>\n\n`;
-    
+
     if (!hasLessons) {
       message += '📢 <i>На этот день занятия не найдены</i>\n';
       message += `\n<i>Обновлено: ${new Date().toLocaleTimeString()}</i>`;
@@ -897,9 +1108,9 @@ private formatDateButton(date: Date, hasLessons: boolean): string {
 
     defaultLessons.forEach(defaultLesson => {
       const lesson = schedule.lessons?.find(l => l.number === defaultLesson.number);
-      
+
       message += `${defaultLesson.number}. ⏰ <b>${defaultLesson.time}</b>\n`;
-      
+
       if (lesson) {
         message += `📚 ${lesson.subject}\n`;
         message += `👩‍🏫 ${lesson.teacher}\n`;

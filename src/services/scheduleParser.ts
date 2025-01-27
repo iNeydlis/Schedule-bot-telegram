@@ -1,61 +1,73 @@
 import axios from 'axios';
 import { load } from 'cheerio';
+import type * as cheerio from 'cheerio';
 import { Lesson, Schedule } from '../types';
 import iconv from 'iconv-lite';
 import TeachersService from '../services/TeachersService';
 import { CacheService } from './cacheService';
 
+const TIME_REGEX = /\d+\.\d+-\d+\.\d+/;
+
 export class ScheduleParser {
-  private baseUrl: string;
-  private readonly timeout: number = 10000;
-  private readonly maxRetries: number = 3;
-  private readonly retryDelay: number = 5000; // 5 seconds
-  private teachersService: TeachersService;
-  private cacheService: CacheService;
+  private readonly baseUrl = 'https://dmitrov.politeh-mo.ru/rasp';
+  private readonly timeout = 10000;
+  private readonly maxRetries = 3;
+  private readonly retryDelay = 5000;
+  private readonly dateFormatter: Intl.DateTimeFormat;
+  private readonly dayFormatter: Intl.DateTimeFormat;
+  private readonly axiosInstance;
+  
+  private readonly teachersService: TeachersService;
+  private readonly cacheService: CacheService;
+
   constructor() {
-    this.baseUrl = 'https://dmitrov.politeh-mo.ru/rasp';
     this.teachersService = TeachersService.getInstance();
     this.cacheService = CacheService.getInstance();
+    
+    this.dateFormatter = new Intl.DateTimeFormat('ru-RU', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric'
+    });
+    
+    this.dayFormatter = new Intl.DateTimeFormat('ru-RU', { weekday: 'long' });
+
+    this.axiosInstance = axios.create({
+      timeout: this.timeout,
+      responseType: 'arraybuffer',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7'
+      },
+      validateStatus: (status) => status === 200
+    });
   }
 
-  private async retry<T>(operation: () => Promise<T>, retries: number = this.maxRetries): Promise<T> {
+  private async retry<T>(operation: () => Promise<T>, retries = this.maxRetries): Promise<T> {
     try {
       return await operation();
     } catch (error) {
       if (retries > 0) {
-        console.log(`Retrying operation, ${retries} attempts left`);
         await new Promise(resolve => setTimeout(resolve, this.retryDelay));
         return this.retry(operation, retries - 1);
       }
       throw error;
     }
   }
-  
-  async fetchSchedule(groupId: string, date: Date = new Date()): Promise<Schedule> {    
+
+  async fetchSchedule(groupId: string, date = new Date()): Promise<Schedule> {
     const dateStr = this.formatDate(date);
+    const cacheKey = `${groupId}_${dateStr}`;
     
     const cachedSchedule = this.cacheService.getSchedule(groupId, dateStr);
-    if (cachedSchedule) {
-      return cachedSchedule;
-    }
+    if (cachedSchedule) return cachedSchedule;
 
     const url = `${this.baseUrl}/cg${groupId}.htm`;
-    console.log('Fetching schedule from:', url);
 
     try {
-      const response = await this.retry(() => 
-        axios.get(url, {
-          timeout: this.timeout,
-          responseType: 'arraybuffer',
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7'
-          },
-          validateStatus: (status) => status === 200
-        })
-      );
-
+      const response = await this.retry(() => this.axiosInstance.get(url));
+      
       if (!response.data) {
         throw new Error('Empty response received');
       }
@@ -70,133 +82,85 @@ export class ScheduleParser {
       if (axios.isAxiosError(error)) {
         const statusCode = error.response?.status;
         const errorMessage = error.response?.statusText || error.message;
-        
-        console.error('Network error:', {
-          url,
-          statusCode,
-          message: errorMessage,
-          details: error.response?.data
-        });
-
         throw new Error(`Failed to fetch schedule: ${statusCode} ${errorMessage}`);
       }
-
-      console.error('Parser error:', error);
       throw error;
     }
   }
+
   private async parseSchedule(html: string, targetDate: Date): Promise<Schedule> {
-    const $ = load(html);
-    const lessons: Lesson[] = [];
-    const targetDateStr = this.formatDate(targetDate);
+    const $ = load(html, { 
+      normalizeWhitespace: true,
+      decodeEntities: false
+    });
     
-    console.log('Looking for date:', targetDateStr);
+    const targetDateStr = this.formatDate(targetDate);
+    const lessons: Lesson[] = [];
 
-    try {
-      let dateFound = false;
-      
-      $('tr').each((_, dateRow) => {
-        const dateCell = $(dateRow).find('td[align="center"]').first();
-        const rowDate = dateCell.text().trim();
-        
-        if (rowDate.includes(targetDateStr)) {
-          dateFound = true;
-          console.log('Found matching date row:', rowDate);
-          
-          const lessonCell = $(dateRow).find('td.ur');
-          const timeCell = $(dateRow).find('td.hd').filter((_, el) => {
-            return $(el).text().includes('Пара:');
-          });
-          
-          if (lessonCell.length && timeCell.length) {
-            const timeText = timeCell.text().trim();
-            const timeMatch = timeText.match(/\d+\.\d+-\d+\.\d+/);
-            const time = timeMatch ? timeMatch[0] : '';
-            
-            const subject = lessonCell.find('.z1').text().trim();
-            const shortTeacherName  = lessonCell.find('.z3').text().trim();
-            const room = lessonCell.find('.z2').text().trim();
-            
-            if (subject) {
-              const teacher = this.teachersService.getFullName(shortTeacherName);
-              lessons.push({
-                number: 1,
-                time,
-                subject,
-                teacher,
-                room
-              });
-              console.log('Found first lesson:', {
-                time,
-                subject,
-                teacher,
-                room
-              });
-            }
-          }
-          
-          let currentRow = $(dateRow).next('tr');
-          for (let i = 1; i < 6; i++) {
-            if (!currentRow.length) break;
-            
-            const timeCell = currentRow.find('td.hd').first();
-            const lessonCell = currentRow.find('td.ur');
-            
-            if (timeCell.length && lessonCell.length) {
-              const timeText = timeCell.text().trim();
-              const timeMatch = timeText.match(/\d+\.\d+-\d+\.\d+/);
-              const time = timeMatch ? timeMatch[0] : '';
-              
-              const subject = lessonCell.find('.z1').text().trim();
-              const shortTeacherName = lessonCell.find('.z3').text().trim();
-              const room = lessonCell.find('.z2').text().trim();
-              
-              if (subject) {
-                const teacher = this.teachersService.getFullName(shortTeacherName);
-                lessons.push({
-                  number: i + 1,
-                  time,
-                  subject,
-                  teacher,
-                  room
-                });
-                console.log(`Found lesson ${i + 1}:`, {
-                  time,
-                  subject,
-                  teacher,
-                  room
-                });
-              }
-            }
-            
-            currentRow = currentRow.next('tr');
-          }
-          
-          return false;
-        }
-      });
+    const dateRows = $('tr').filter((_, row) => {
+      const dateCell = $(row).find('td[align="center"]').first();
+      return dateCell.text().trim().includes(targetDateStr);
+    });
 
-      if (!dateFound) {
-        console.log('No matching date found in the schedule');
-      }
-
+    if (dateRows.length === 0) {
       return {
-        date: targetDate.toLocaleDateString('ru-RU'),
-        dayOfWeek: targetDate.toLocaleDateString('ru-RU', { weekday: 'long' }),
-        lessons: lessons.sort((a, b) => a.number - b.number)
+        date: this.formatDate(targetDate),
+        dayOfWeek: this.formatDayOfWeek(targetDate),
+        lessons: []
       };
-
-    } catch (error) {
-      console.error('HTML parsing error:', error);
-      throw new Error('Failed to parse HTML content');
     }
+
+    const dateRow = dateRows.first();
+    
+    this.parseLessonFromRow($, dateRow, 1, lessons);
+
+    let currentRow = dateRow.next('tr');
+    for (let i = 1; currentRow.length && i < 6; i++) {
+      this.parseLessonFromRow($, currentRow, i + 1, lessons);
+      currentRow = currentRow.next('tr');
+    }
+
+    return {
+      date: this.formatDate(targetDate),
+      dayOfWeek: this.formatDayOfWeek(targetDate),
+      lessons: lessons
+    };
+  }
+
+  private parseLessonFromRow($: cheerio.Root, $row: cheerio.Cheerio, number: number, lessons: Lesson[]): void {
+    const timeCell = $row.find('td.hd').filter((_, el) => {
+      return $(el).text().includes('Пара:');
+    });
+    
+    const lessonCell = $row.find('td.ur');
+    
+    if (!timeCell.length || !lessonCell.length) return;
+
+    const timeText = timeCell.text().trim();
+    const timeMatch = timeText.match(TIME_REGEX);
+    if (!timeMatch) return;
+
+    const subject = lessonCell.find('.z1').text().trim();
+    if (!subject) return;
+
+    const shortTeacherName = lessonCell.find('.z3').text().trim();
+    const room = lessonCell.find('.z2').text().trim();
+    const teacher = this.teachersService.getFullName(shortTeacherName);
+
+    lessons.push({
+      number,
+      time: timeMatch[0],
+      subject,
+      teacher,
+      room
+    });
   }
 
   private formatDate(date: Date): string {
-    return date.toLocaleDateString('ru-RU', {
-      day: '2-digit',
-      month: '2-digit',
-      year: 'numeric'
-    });
+    return this.dateFormatter.format(date);
+  }
+
+  private formatDayOfWeek(date: Date): string {
+    return this.dayFormatter.format(date);
   }
 }

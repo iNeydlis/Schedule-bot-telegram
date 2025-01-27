@@ -85,57 +85,57 @@ export class NotificationService {
       if (match && match[0]) {
         const currentUpdateTime = match[0];
         const currentHour = new Date().getHours();
+        const currentMinute = new Date().getMinutes();
         
-        console.log(`Current time: ${currentHour}:00`);
-        console.log(`Last update time: ${this.lastUpdateTime}`);
-        console.log(`Current update time: ${currentUpdateTime}`);
-        console.log(`Is first run: ${this.isFirstRun}`);
-  
         if (this.isFirstRun) {
           console.log('First run detected - saving initial state');
           this.lastUpdateTime = currentUpdateTime;
           this.isFirstRun = false;
           return;
         }
-  
         
         if (this.lastUpdateTime !== currentUpdateTime) {
           console.log('New update detected');
           this.lastUpdateTime = currentUpdateTime;
           this.cacheService.clearAllScheduleCaches();
-          if (this.scheduledTimer) {
-            console.log('Cancelling previously scheduled notification');
-            clearTimeout(this.scheduledTimer);
-            this.scheduledTimer = null;
-          }
           
-          if (currentHour >= 15) {
-            console.log('After 15:00 - checking and sending notifications immediately');
-            await this.checkAndSendNotifications();
-          } else {           
+          const users = await UserPreferenceModel.find({ notifications: true });
+          
+          for (const user of users) {
+            if (this.scheduledTimer) {
+              clearTimeout(this.scheduledTimer);
+              this.scheduledTimer = null;
+            }
+
+            const [prefHour, prefMinute] = user.notificationTime.split(':').map(Number);
             const now = new Date();
             const scheduledTime = new Date(
               now.getFullYear(),
               now.getMonth(),
               now.getDate(),
-              15,
-              0,
+              prefHour,
+              prefMinute,
               0
             );
-            
-            const timeUntilScheduled = scheduledTime.getTime() - now.getTime();
-            if (timeUntilScheduled > 0) {
-              console.log(`Before 15:00 - scheduling notification for later`);
-              this.scheduledTimer = setTimeout(async () => {
-                try {
-                  await this.checkAndSendNotifications();
-                } catch (error) {
-                  console.error('Error sending scheduled notification:', error);
-                } finally {
-                  this.scheduledTimer = null;
-                }
-              }, timeUntilScheduled);
-              console.log(`Notification scheduled for 15:00 (in ${Math.round(timeUntilScheduled/1000/60)} minutes)`);
+
+            if (currentHour > prefHour || (currentHour === prefHour && currentMinute >= prefMinute)) {
+              console.log(`After ${user.notificationTime} - checking and sending notifications immediately for user ${user.chatId}`);
+              await this.checkAndSendNotificationsForUser(user);
+            } else {
+              const timeUntilScheduled = scheduledTime.getTime() - now.getTime();
+              if (timeUntilScheduled > 0) {
+                console.log(`Scheduling notification for user ${user.chatId} at ${user.notificationTime}`);
+                this.scheduledTimer = setTimeout(async () => {
+                  try {
+                    await this.checkAndSendNotificationsForUser(user);
+                  } catch (error) {
+                    console.error('Error sending scheduled notification:', error);
+                  } finally {
+                    this.scheduledTimer = null;
+                  }
+                }, timeUntilScheduled);
+                console.log(`Notification scheduled for ${user.notificationTime} (in ${Math.round(timeUntilScheduled/1000/60)} minutes)`);
+              }
             }
           }
         }
@@ -144,6 +144,25 @@ export class NotificationService {
       console.error('Ошибка при проверке страницы:', error);
     } finally {
       this.isProcessing = false;
+    }
+  }
+
+  private async checkAndSendNotificationsForUser(user: any): Promise<void> {
+    try {
+      const tomorrow = new Date();
+      tomorrow.setDate(tomorrow.getDate() + 1);
+      
+      const schedule = await this.scheduleParser.fetchSchedule(user.groupId, tomorrow);
+      const newScheduleHash = this.generateScheduleHash(schedule);
+      const previousHash = this.cacheService.getScheduleHash(user.chatId, tomorrow);
+
+      if (previousHash !== newScheduleHash) {
+        console.log(`Sending notification to ${user.chatId} due to schedule changes`);
+        await this.sendNotification(user.chatId, schedule);
+        this.cacheService.setScheduleHash(user.chatId, tomorrow, newScheduleHash);
+      }
+    } catch (error) {
+      console.error(`Error processing schedule for chat ${user.chatId}:`, error);
     }
   }
 

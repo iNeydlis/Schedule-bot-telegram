@@ -6,6 +6,7 @@ const userPreferenceSchema = new Schema<UserPreference>({
   chatId: { type: Number, required: true },
   groupId: { type: String, required: true },
   notifications: { type: Boolean, default: false },
+  notificationTime: { type: String, default: "15:00" },
   isGroupChat: { type: Boolean, default: false },
   groupChatId: { type: Number }
 });
