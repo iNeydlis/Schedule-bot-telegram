@@ -25,7 +25,8 @@ export class NotificationService {
     keyboard: [
       [{ text: "📅 Расписание" }, { text: "📆 Выбрать дату" }],
       [{ text: "👥 Сменить группу" }, { text: "🔔 Уведомления" }],
-      [{ text: "👤 Профиль" }, { text: "📋 Другая группа" }]
+      [{ text: "👤 Профиль" }, { text: "📋 Другая группа" }],
+      [{ text: "✍️ Обратная связь" }]
     ],
     resize_keyboard: true,
     persistent: true

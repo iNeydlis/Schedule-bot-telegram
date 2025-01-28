@@ -32,3 +32,14 @@ export interface Teacher{
   shortName: string;
   disciplines: []
 }
+
+export interface Report {
+  id: string;
+  username: string;
+  userId: number;
+  chatId: number;
+  description: string;
+  timestamp: string;
+  isGroupChat: boolean;
+  groupTitle?: string;
+}

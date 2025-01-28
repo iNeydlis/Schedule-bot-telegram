@@ -6,13 +6,15 @@ import { Schedule, Lesson } from './types';
 import { groupMap } from './groupMap';
 import { MessageManager } from './services/messageManager';
 import { TimeInputHandler } from './models/TimeInputHandler';
+import { ReportService } from './services/ReportService';
 
-const VERSION = '0.9.4 BETA';
+const VERSION = '0.9.6 BETA';
 
 export class ScheduleBot {
   private bot: TelegramBot;
   private scheduleParser: ScheduleParser;
   private notificationService: NotificationService;
+  private reportService: ReportService;
   private messageManager: MessageManager;
   private dateMap: Map<number, Date>;
   private userSelectedDates: Set<number>;
@@ -20,7 +22,8 @@ export class ScheduleBot {
     keyboard: [
       [{ text: "📅 Расписание" }, { text: "📆 Выбрать дату" }],
       [{ text: "👥 Сменить группу" }, { text: "🔔 Уведомления" }],
-      [{ text: "👤 Статистика" }, { text: "📋 Другая группа" }]
+      [{ text: "👤 Статистика" }, { text: "📋 Другая группа" }],
+      [{ text: "✍️ Обратная связь" }]
     ],
     resize_keyboard: true,
     persistent: true
@@ -38,6 +41,7 @@ export class ScheduleBot {
         }
       }
     });
+    this.reportService = new ReportService();
     this.scheduleParser = new ScheduleParser();
     this.messageManager = new MessageManager();
     this.notificationService = new NotificationService(this.bot, this.messageManager);
@@ -81,15 +85,7 @@ export class ScheduleBot {
   }
 
 
-  private setupMainMenu(): void {
-    const keyboard = {
-      keyboard: [
-        [{ text: "📅 Расписание" }, { text: "📆 Выбрать дату" }],
-        [{ text: "👥 Сменить группу" }, { text: "🔔 Уведомления" }]
-      ],
-      resize_keyboard: true,
-      persistent: true
-    };
+  private setupMainMenu(): void {    
 
     this.bot.setMyCommands([
       { command: '/start', description: 'Начать работу с ботом' },
@@ -97,7 +93,8 @@ export class ScheduleBot {
       { command: '/other', description: 'Посмотреть расписание другой группы' },
       { command: '/notifications', description: 'Управление уведомлениями' },
       { command: '/stats', description: 'Показать статистику бота' },
-      { command: '/help', description: 'Помощь по использованию бота' }
+      { command: '/help', description: 'Помощь по использованию бота' },
+      { command: '/report', description: 'Отправить сообщение об ошибке' }
     ]);
   }
 
@@ -150,6 +147,10 @@ export class ScheduleBot {
       await this.messageManager.setState(chatId, null);
       return;
     }
+    if (currentState === 'awaiting_report') {
+      await this.handleReportSubmission(msg);
+      return;
+    }
 
     if (isGroupChat) {
       const isReplyToBot = msg.reply_to_message?.from?.id === this.botId;
@@ -167,6 +168,9 @@ export class ScheduleBot {
         case '/start':
           await this.handleStart(msg);
           break;
+        case '/report':
+          await this.handleReport(msg);
+          break;
         case '/schedule':
         case '📅 Расписание':
           await this.handleSchedule(msg);
@@ -174,6 +178,9 @@ export class ScheduleBot {
         case '/other':
         case '📋 Другая группа':
           await this.handleOtherSchedule(msg);
+          break;
+        case '✍️ Обратная связь':
+          await this.handleReport(msg);
           break;
         case '/stats':
         case '👤 Статистика':
@@ -212,6 +219,9 @@ export class ScheduleBot {
         case '/start':
           await this.handleStart(msg);
           break;
+        case '/report':
+          await this.handleReport(msg);
+          break;
         case '/schedule':
         case '📅 Расписание':
           await this.handleSchedule(msg);
@@ -219,6 +229,9 @@ export class ScheduleBot {
         case '/other':
         case '📋 Другая группа':
           await this.handleOtherSchedule(msg);
+          break;
+        case '✍️ Обратная связь':
+          await this.handleReport(msg);
           break;
         case '/stats':
         case '👤 Статистика':
@@ -252,6 +265,61 @@ export class ScheduleBot {
           }
       }
     }
+  }
+
+  private async handleReport(msg: TelegramBot.Message): Promise<void> {
+    const chatId = msg.chat.id;
+
+    const keyboard = {
+      inline_keyboard: [
+        [{ text: "❌ Отменить", callback_data: "cancel_report" }]
+      ]
+    };
+
+    await this.sendBotMessage(
+      chatId,
+      'Пожалуйста, опишите проблему или предложение подробно в одном сообщении:',
+      {
+        parse_mode: 'HTML',
+        reply_markup: keyboard
+      }
+    );
+
+    await this.messageManager.setState(chatId, 'awaiting_report');
+  }
+
+  private async handleReportSubmission(msg: TelegramBot.Message): Promise<void> {
+    const chatId = msg.chat.id;
+    const userId = msg.from?.id;
+    const username = msg.from?.username || 'Unknown';
+    const description = msg.text || '';
+    const isGroupChat = msg.chat.type === 'group' || msg.chat.type === 'supergroup';
+
+    if (!userId) return;
+
+    try {
+      this.reportService.addReport({
+        userId,
+        chatId,
+        username,
+        description,
+        isGroupChat,
+        groupTitle: msg.chat.title
+      });
+
+      await this.sendBotMessage(
+        chatId,
+        '✅ Спасибо за обратную связь! Ваше сообщение сохранено и будет рассмотрено.'
+      );
+    } catch (error) {
+      console.error('Error saving report:', error);
+      await this.sendBotMessage(
+        chatId,
+        'Произошла ошибка при сохранении сообщения. Попробуйте позже.'
+      );
+    }
+
+    await this.messageManager.setState(chatId, null);
   }
 
   private async handleStats(msg: TelegramBot.Message): Promise<void> {
@@ -895,6 +963,9 @@ export class ScheduleBot {
         case data.startsWith('set_time_'):
           await this.setNotificationTime(chatId, data.split('_')[2]);
           break;
+        case data === 'cancel_report':
+          await this.cancelReport(chatId);
+          break;
         case data === 'show_schedule':
           await this.handleSchedule({
             ...query.message,
@@ -928,6 +999,14 @@ export class ScheduleBot {
 
       }
     }
+  }
+
+  private async cancelReport(chatId: number): Promise<void> {
+    await this.messageManager.setState(chatId, null);
+    await this.sendBotMessage(
+      chatId,
+      '❌ Отправка сообщения отменена'
+    );
   }
 
   private async toggleNotifications(chatId: number, userId: number): Promise<void> {
