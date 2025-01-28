@@ -37,12 +37,73 @@ export class NotificationService {
     this.messageManager = messageManager;
     this.cacheService = CacheService.getInstance();
     this.initializeNotifications();
-    
+    this.initializeUserPreferencesListener();
+
     cron.schedule('0 0 * * *', async () => {
       await this.cleanupInactiveUsers();
     }, {
       timezone: 'Europe/Moscow'
     });
+  }
+
+  private async initializeUserPreferencesListener(): Promise<void> {
+    try {
+      let lastTimeValues = new Map<number, string>();
+      
+      setInterval(async () => {
+        try {
+          const preferences = await UserPreferenceModel.find({});
+   
+          for (const pref of preferences) {
+            const lastTime = lastTimeValues.get(pref.chatId);
+            if (lastTime !== pref.notificationTime) {
+              console.log(`Notification time changed for user ${pref.chatId}: ${pref.notificationTime}`);
+              await this.modifyExistingTimer(pref);
+              lastTimeValues.set(pref.chatId, pref.notificationTime);
+            }
+          }
+        } catch (error) {
+          console.error('Error checking for updates:', error);
+        }
+      }, 5000);
+   
+    } catch (error) {
+      console.error('Error initializing preference listener:', error);
+    }
+   }
+
+  private async modifyExistingTimer(user: UserPreference): Promise<void> {
+    const existingTimer = this.userTimers.get(user.chatId);
+    if (!existingTimer) {
+      return;
+    }  
+    const [prefHour, prefMinute] = user.notificationTime.split(':').map(Number);
+    const now = new Date();
+    const scheduledTime = new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      now.getDate(),
+      prefHour,
+      prefMinute,
+      0
+    );
+  
+    const timeUntilScheduled = scheduledTime.getTime() - now.getTime();
+  
+    clearTimeout(existingTimer);
+  
+    const timer = setTimeout(async () => {
+      try {
+        await this.checkAndSendNotificationsForUser(user);
+      } catch (error) {
+        console.error(`Error sending scheduled notification for user ${user.chatId}:`, error);
+      } finally {
+        this.userTimers.delete(user.chatId);
+      }
+    }, timeUntilScheduled);
+  
+    this.userTimers.set(user.chatId, timer);
+    console.log(`timer changed for user ${user.chatId}`);
   }
 
   private initializeNotifications(): void {

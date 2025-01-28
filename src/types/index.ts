@@ -18,7 +18,7 @@ export interface UserPreference {
   chatId: number;
   groupId: string;
   notifications: boolean;
-  notificationTime: String, 
+  notificationTime: string, 
   isGroupChat: boolean;
   groupChatId?: number;
 }
