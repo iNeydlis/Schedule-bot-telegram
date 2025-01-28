@@ -8,7 +8,7 @@ import { MessageManager } from './services/messageManager';
 import { TimeInputHandler } from './models/TimeInputHandler';
 import { ReportService } from './services/ReportService';
 
-const VERSION = '0.9.6 BETA';
+const VERSION = '0.10.0 BETA';
 
 export class ScheduleBot {
   private bot: TelegramBot;
