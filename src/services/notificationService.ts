@@ -73,11 +73,15 @@ export class NotificationService {
     }
    }
 
-  private async modifyExistingTimer(user: UserPreference): Promise<void> {
+   private async modifyExistingTimer(user: UserPreference): Promise<void> {
     const existingTimer = this.userTimers.get(user.chatId);
     if (!existingTimer) {
       return;
-    }  
+    }
+
+    clearTimeout(existingTimer);
+    this.userTimers.delete(user.chatId);
+  
     const [prefHour, prefMinute] = user.notificationTime.split(':').map(Number);
     const now = new Date();
     const scheduledTime = new Date(
@@ -89,9 +93,19 @@ export class NotificationService {
       0
     );
   
-    const timeUntilScheduled = scheduledTime.getTime() - now.getTime();
+    const currentHour = now.getHours();
+    const currentMinute = now.getMinutes();
   
-    clearTimeout(existingTimer);
+    if (currentHour > prefHour || (currentHour === prefHour && currentMinute >= prefMinute)) {
+      console.log(`After ${user.notificationTime} - checking and sending notifications immediately for user ${user.chatId}`);
+      await this.checkAndSendNotificationsForUser(user);
+      return;
+    }
+  
+    const timeUntilScheduled = scheduledTime.getTime() - now.getTime();
+    if (timeUntilScheduled <= 0) return;
+  
+    console.log(`Scheduling notification for user ${user.chatId} at ${user.notificationTime}`);
   
     const timer = setTimeout(async () => {
       try {
@@ -104,7 +118,7 @@ export class NotificationService {
     }, timeUntilScheduled);
   
     this.userTimers.set(user.chatId, timer);
-    console.log(`timer changed for user ${user.chatId}`);
+    console.log(`Timer changed for user ${user.chatId}`);
   }
 
   private initializeNotifications(): void {
