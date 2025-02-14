@@ -20,6 +20,9 @@ export class NotificationService {
   private scheduledTimer: NodeJS.Timeout | null = null;
   private isProcessing: boolean = false;
   private userTimers: Map<number, NodeJS.Timeout> = new Map();
+  private updateDebounceTimer: NodeJS.Timeout | null = null;
+private pendingUpdateTime: string | null = null;
+private useTestTime = false;
   
   private readonly mainKeyboard = {
     keyboard: [
@@ -73,6 +76,32 @@ export class NotificationService {
     }
    }
 
+   private async processUpdate(newUpdateTime: string): Promise<void> {
+    
+    this.pendingUpdateTime = newUpdateTime;   
+   
+    if (this.updateDebounceTimer) {
+      clearTimeout(this.updateDebounceTimer);
+      console.log('Reset debounce timer due to new update');
+    } else {
+      console.log('Setting debounce timer for first update');
+    }
+    
+    this.updateDebounceTimer = setTimeout(() => {
+      console.log('Debounce period ended, clearing cache and sending notifications');
+     
+      this.lastUpdateTime = this.pendingUpdateTime!;
+      this.pendingUpdateTime = null;
+      this.updateDebounceTimer = null;
+      console.log("Starting to clear cache...");
+      this.cacheService.clearAllScheduleCaches();
+      
+      this.scheduleNotificationsForAllUsers().catch(err => {
+        console.error('Error sending notifications:', err);
+      });
+    }, 10000);
+  }
+   
    private async modifyExistingTimer(user: UserPreference): Promise<void> {
     const existingTimer = this.userTimers.get(user.chatId);
     if (!existingTimer) {
@@ -143,6 +172,21 @@ export class NotificationService {
     this.isProcessing = true;
     
     try {
+      let updatedText: string;
+
+      if (this.useTestTime) {
+        // Генерируем новое время для тестов
+        const now = new Date();
+        const day = now.getDate().toString().padStart(2, '0');
+        const month = (now.getMonth() + 1).toString().padStart(2, '0');
+        const year = now.getFullYear();
+        const hours = now.getHours().toString().padStart(2, '0');
+        const minutes = now.getMinutes().toString().padStart(2, '0');
+        
+        updatedText = `Обновлено: ${day}.${month}.${year} в ${hours}:${minutes}`;
+        console.log(`Using test time: ${updatedText}`);
+      } else {
+
       const response = await this.retry(() =>
         axios.get("https://dmitrov.politeh-mo.ru/rasp/hg.htm", {
           timeout: 10000,
@@ -157,8 +201,8 @@ export class NotificationService {
       
       const html = iconv.decode(Buffer.from(response.data), 'win1251');
       const $ = load(html);
-      const updatedText = $('.ref').text();
-      
+      updatedText = $('.ref').text();
+    }
       const match = updatedText.match(/Обновлено: (\d{2})\.(\d{2})\.(\d{4}) в (\d{2}):(\d{2})/);
       
       if (!match?.[0]) return;
@@ -169,16 +213,17 @@ export class NotificationService {
         console.log('First run detected - saving initial state');
         this.lastUpdateTime = currentUpdateTime;
         this.isFirstRun = false;
+        console.log(`Current update time: ${this.lastUpdateTime}`);
         return;
       }
       
       if (this.lastUpdateTime === currentUpdateTime) return;
       
       console.log('New update detected');
-      this.lastUpdateTime = currentUpdateTime;
-      this.cacheService.clearAllScheduleCaches();
-      
-      await this.scheduleNotificationsForAllUsers();
+    console.log(`Previous update time: ${this.lastUpdateTime}`);
+    console.log(`Current update time: ${currentUpdateTime}`);
+    
+    await this.processUpdate(currentUpdateTime);
       
     } catch (error) {
       console.error('Ошибка при проверке страницы:', error);

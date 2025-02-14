@@ -48,14 +48,22 @@ export class CacheService {
     this.cache.set(key, hash, ttlSeconds);
   }
 
- 
   public clearAllScheduleCaches(): void {
-    const keys = this.cache.keys();       
-    const scheduleKeys = keys.filter(key => 
+    const keys = this.cache.keys();
+    const scheduleKeys = keys.filter(key =>
       key.startsWith(this.SCHEDULE_PREFIX) && !key.startsWith(this.SCHEDULE_HASH_PREFIX)
-    );
-    console.log('Clearing schedule cache keys:', scheduleKeys);
-    this.cache.del(scheduleKeys);   
+    );    
+    console.log('Clearing schedule cache keys:', scheduleKeys); 
+   
+    scheduleKeys.forEach(key => {
+      this.cache.del(key);
+    });   
+    const remainingKeys = this.cache.keys().filter(key =>
+      key.startsWith(this.SCHEDULE_PREFIX) && !key.startsWith(this.SCHEDULE_HASH_PREFIX)
+    );    
+    if (remainingKeys.length > 0) {
+      console.warn('Warning: Some cache keys were not cleared:', remainingKeys);
+    }
   }
 
   public clearAllScheduleHashes(): void {
