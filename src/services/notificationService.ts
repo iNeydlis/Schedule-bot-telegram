@@ -22,7 +22,7 @@ export class NotificationService {
   private userTimers: Map<number, NodeJS.Timeout> = new Map();
   private updateDebounceTimer: NodeJS.Timeout | null = null;
 private pendingUpdateTime: string | null = null;
-private useTestTime = false;
+private useTestTime = process.env.TIME_TEST?.toLowerCase() === 'true';
   
   private readonly mainKeyboard = {
     keyboard: [

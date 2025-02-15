@@ -50,21 +50,45 @@ export class CacheService {
 
   public clearAllScheduleCaches(): void {
     const keys = this.cache.keys();
-    const scheduleKeys = keys.filter(key =>
-      key.startsWith(this.SCHEDULE_PREFIX) && !key.startsWith(this.SCHEDULE_HASH_PREFIX)
-    );    
-    console.log('Clearing schedule cache keys:', scheduleKeys); 
-   
+    const scheduleKeys = keys.filter(key => 
+        key.startsWith(this.SCHEDULE_PREFIX) && 
+        !key.startsWith(this.SCHEDULE_HASH_PREFIX)
+    );
+    
+    console.log('Starting cache clearing process');
+    console.log('Found schedule keys:', scheduleKeys);
+    
+    let failedKeys: string[] = [];
     scheduleKeys.forEach(key => {
-      this.cache.del(key);
-    });   
+        const success = this.cache.del(key);
+        if (!success) {
+            failedKeys.push(key);
+            console.log(`Failed to delete key: ${key}`);
+        } else {
+            console.log(`Successfully deleted key: ${key}`);
+        }
+    });
+ 
     const remainingKeys = this.cache.keys().filter(key =>
-      key.startsWith(this.SCHEDULE_PREFIX) && !key.startsWith(this.SCHEDULE_HASH_PREFIX)
-    );    
+        key.startsWith(this.SCHEDULE_PREFIX) && 
+        !key.startsWith(this.SCHEDULE_HASH_PREFIX)
+    );
+ 
     if (remainingKeys.length > 0) {
-      console.warn('Warning: Some cache keys were not cleared:', remainingKeys);
+        console.log('Attempting second deletion for remaining keys:', remainingKeys);
+        remainingKeys.forEach(key => {
+            const success = this.cache.del(key);
+            console.log(`Second attempt to delete ${key}: ${success ? 'successful' : 'failed'}`);
+        });
     }
-  }
+ 
+    console.log('Cache clearing process completed');
+    console.log('Failed keys:', failedKeys);
+    console.log('Final remaining keys:', this.cache.keys().filter(key =>
+        key.startsWith(this.SCHEDULE_PREFIX) && 
+        !key.startsWith(this.SCHEDULE_HASH_PREFIX)
+    ));
+ }
 
   public clearAllScheduleHashes(): void {
     const keys = this.cache.keys();    

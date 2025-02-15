@@ -19,7 +19,7 @@ export class ScheduleParser {
   
   private readonly teachersService: TeachersService;
   private readonly cacheService: CacheService;
-  private readonly htmlCache = new Map<string, string>();
+
 
   constructor() {
     this.teachersService = TeachersService.getInstance();
@@ -59,39 +59,23 @@ export class ScheduleParser {
 
   async fetchSchedule(groupId: string, date = new Date()): Promise<Schedule> {
     const dateStr = this.formatDate(date);
-    const cacheKey = `${groupId}_${dateStr}`;
     
     const cachedSchedule = this.cacheService.getSchedule(groupId, dateStr);
     if (cachedSchedule) return cachedSchedule;
-
-    let html = this.htmlCache.get(groupId);
+   
+    const url = `${this.baseUrl}/cg${groupId}.htm`;
+    const response = await this.retry(() => this.axiosInstance.get(url));
     
-    if (!html) {
-      const url = `${this.baseUrl}/cg${groupId}.htm`;
-      try {
-        const response = await this.retry(() => this.axiosInstance.get(url));
-        
-        if (!response.data) {
-          throw new Error('Empty response received');
-        }
-
-        html = iconv.decode(Buffer.from(response.data), 'win1251');
-        this.htmlCache.set(groupId, html);
-        
-      } catch (error) {
-        if (axios.isAxiosError(error)) {
-          const statusCode = error.response?.status;
-          const errorMessage = error.response?.statusText || error.message;
-          throw new Error(`Failed to fetch schedule: ${statusCode} ${errorMessage}`);
-        }
-        throw error;
-      }
+    if (!response.data) {
+        throw new Error('Empty response received');
     }
 
-    const schedule = await this.parseSchedule(html, date);
+    const html = iconv.decode(Buffer.from(response.data), 'win1251');
+    const schedule = await this.parseSchedule(html, date);    
+    
     this.cacheService.setSchedule(groupId, dateStr, schedule);
     return schedule;
-  }
+}
 
   private async parseSchedule(html: string, targetDate: Date): Promise<Schedule> {
     const $ = load(html, { 
@@ -175,12 +159,5 @@ export class ScheduleParser {
   private formatDayOfWeek(date: Date): string {
     return this.dayFormatter.format(date);
   }
-
-  public clearHtmlCache(groupId?: string): void {
-    if (groupId) {
-      this.htmlCache.delete(groupId);
-    } else {
-      this.htmlCache.clear();
-    }
-  }
+  
 }
