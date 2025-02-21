@@ -1111,50 +1111,41 @@ export class ScheduleBot {
       const maxDays = 14;
       const batchSize = 3;
       let attempts = 0;
-
-      while (currentDate.getDay() === 0 || currentDate.getDay() === 6) {
-        if (direction === 'forward') {
-          currentDate.setDate(currentDate.getDate() + 1);
-        } else {
-          currentDate.setDate(currentDate.getDate() - 1);
-        }
-      }
-
+            
       while (attempts < maxDays) {
         const datesToCheck: Date[] = [];
         let tempDate = new Date(currentDate);
-
+        
         while (datesToCheck.length < batchSize && attempts < maxDays) {
-          if (tempDate.getDay() !== 0 && tempDate.getDay() !== 6) {
-            datesToCheck.push(new Date(tempDate));
-            attempts++;
-          }
+          
+          datesToCheck.push(new Date(tempDate));
+          attempts++;
+          
           if (direction === 'forward') {
             tempDate.setDate(tempDate.getDate() + 1);
           } else {
             tempDate.setDate(tempDate.getDate() - 1);
           }
         }
-
+        
         if (datesToCheck.length === 0) break;
-
+        
         const schedulePromises = datesToCheck.map(date =>
           this.scheduleParser.fetchSchedule(groupId, date)
         );
-
+        
         const schedules = await Promise.all(schedulePromises);
-
+        
         for (let i = 0; i < schedules.length; i++) {
           if (schedules[i].lessons && schedules[i].lessons.length > 0) {
             return datesToCheck[i];
           }
         }
-
+        
         currentDate = new Date(tempDate);
       }
-
+      
       return startDate;
-
     } catch (error) {
       console.error('Error in findNextAvailableDay:', error);
       return startDate;
